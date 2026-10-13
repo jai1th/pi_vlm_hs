@@ -24,7 +24,8 @@ from vlm_pi_client import DEFAULT_SERVER, PiVLMClient, VLMClientError
 def parse_args():
     p = argparse.ArgumentParser(description="Capture a frame and detect waste classes via the VLM server")
     p.add_argument("--source", choices=("orbbec", "file"), default="orbbec")
-    p.add_argument("--camera-ip", help="Gemini 335Le IP address (source=orbbec)")
+    p.add_argument("--camera-ip", help="Camera IP; omit to let the SDK discover the camera (source=orbbec)")
+    p.add_argument("--list-devices", action="store_true", help="List discoverable Orbbec devices and exit")
     p.add_argument("--camera-port", type=int, default=8090)
     p.add_argument("--image", help="Image path (source=file)")
     p.add_argument("--config", default="config/preprocess.json")
@@ -50,6 +51,10 @@ def run_once(source, client, as_json, save_dir=None):
 
 def main():
     args = parse_args()
+    if args.list_devices:
+        from capture import list_devices
+        list_devices()
+        return 0
     try:
         source = make_source(args.source, args.image, args.camera_ip, args.camera_port)
         client = PiVLMClient(args.config, args.server)

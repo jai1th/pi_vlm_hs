@@ -34,7 +34,8 @@ class FileCapture:
 
 
 class OrbbecCapture:
-    """Colour stream from a Gemini 335Le addressed by IP (default port 8090).
+    """Colour stream from a Gemini 335Le. With ip=None the SDK discovers it;
+    with an ip, create_net_device(ip, port) is used (the Femto Mega path).
 
     pyorbbecsdk is imported lazily so the rest of the Pi code works without it.
     """
@@ -56,7 +57,14 @@ class OrbbecCapture:
 
         try:
             ctx = ob.Context()
-            device = ctx.create_net_device(self.ip, self.port)
+            if self.ip:
+                device = ctx.create_net_device(self.ip, self.port)
+            else:
+                # Let the SDK discover the camera on the network (GVCP broadcast).
+                devices = ctx.query_devices()
+                if devices.get_count() == 0:
+                    raise CaptureError("no Orbbec device discovered on the network")
+                device = devices.get_device_by_index(0)
             pipeline = ob.Pipeline(device)
             config = ob.Config()
             profiles = pipeline.get_stream_profile_list(ob.OBSensorType.COLOR_SENSOR)
@@ -107,13 +115,24 @@ class OrbbecCapture:
                 self._pipeline = None
 
 
+def list_devices():
+    """Print every Orbbec device the SDK can discover (USB and network)."""
+    import pyorbbecsdk as ob
+    devices = ob.Context().query_devices()
+    n = devices.get_count()
+    print("{} device(s) found".format(n))
+    for i in range(n):
+        info = devices.get_device_by_index(i).get_device_info()
+        print("  [{}] {} serial={} ip={}".format(
+            i, info.get_name(), info.get_serial_number(),
+            getattr(info, "get_ip_address", lambda: "?")()))
+
+
 def make_source(kind, image=None, camera_ip=None, camera_port=8090):
     if kind == "file":
         if not image:
             raise CaptureError("--image is required with --source file")
         return FileCapture(image)
     if kind == "orbbec":
-        if not camera_ip:
-            raise CaptureError("--camera-ip is required with --source orbbec")
         return OrbbecCapture(camera_ip, camera_port)
     raise CaptureError("unknown source {!r}".format(kind))
