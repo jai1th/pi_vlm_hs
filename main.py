@@ -1,6 +1,7 @@
 """Pi entry point: capture -> VLM server -> print detected classes.
 
-  python3 main.py --source orbbec --camera-ip 192.168.1.10
+  python3 main.py --source orbbec --camera-ip 192.168.1.10   # press Enter to capture, q to quit
+  python3 main.py --source orbbec --camera-ip ... --once
   python3 main.py --source orbbec --camera-ip ... --save-dir captures
   python3 main.py --source file --image test.jpg          # no camera needed
   python3 main.py --source orbbec --camera-ip ... --loop --interval 2
@@ -28,8 +29,10 @@ def parse_args():
     p.add_argument("--image", help="Image path (source=file)")
     p.add_argument("--config", default="config/preprocess.json")
     p.add_argument("--server", default=DEFAULT_SERVER)
-    p.add_argument("--loop", action="store_true", help="Keep capturing until Ctrl+C")
-    p.add_argument("--interval", type=float, default=1.0, help="Seconds between loop iterations")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--loop", action="store_true", help="Capture continuously until Ctrl+C (no Enter needed)")
+    mode.add_argument("--once", action="store_true", help="Capture a single frame and exit")
+    p.add_argument("--interval", type=float, default=1.0, help="Seconds between --loop iterations")
     p.add_argument("--save-dir", help="Save each raw frame (and its result JSON) here")
     p.add_argument("--json", action="store_true", help="Print the full result as JSON")
     return p.parse_args()
@@ -57,16 +60,31 @@ def main():
     try:
         source.open()
         client.check_ready()
+        if args.once or args.loop:
+            while True:
+                try:
+                    run_once(source, client, args.json, args.save_dir)
+                except (VLMClientError, CaptureError) as exc:
+                    print("error: {}".format(exc), file=sys.stderr)
+                    if args.once:
+                        return 1
+                if args.once:
+                    return 0
+                time.sleep(args.interval)
+
+        # Default: one capture per Enter press.
+        print("Ready. Press Enter to capture, q + Enter (or Ctrl+C) to quit.")
         while True:
+            try:
+                line = input("> ")
+            except EOFError:
+                return 0
+            if line.strip().lower() in ("q", "quit", "exit"):
+                return 0
             try:
                 run_once(source, client, args.json, args.save_dir)
             except (VLMClientError, CaptureError) as exc:
                 print("error: {}".format(exc), file=sys.stderr)
-                if not args.loop:
-                    return 1
-            if not args.loop:
-                return 0
-            time.sleep(args.interval)
     except (VLMClientError, CaptureError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 1

@@ -39,10 +39,11 @@ class OrbbecCapture:
     pyorbbecsdk is imported lazily so the rest of the Pi code works without it.
     """
 
-    def __init__(self, ip, port=8090, timeout_ms=2000):
+    def __init__(self, ip, port=8090, timeout_ms=2000, skip_frames=3):
         self.ip = ip
         self.port = port
         self.timeout_ms = timeout_ms
+        self.skip_frames = skip_frames
         self._ob = None
         self._pipeline = None
 
@@ -76,6 +77,10 @@ class OrbbecCapture:
         if self._pipeline is None:
             raise CaptureError("camera not open; call open() first")
         ob = self._ob
+        # The pipeline streams while we wait for Enter, so the first frames
+        # returned can be stale. Skip a few and use the newest.
+        for _ in range(self.skip_frames):
+            self._pipeline.wait_for_frames(self.timeout_ms)
         frames = self._pipeline.wait_for_frames(self.timeout_ms)
         if frames is None:
             raise CaptureError("timed out waiting for a frame")
