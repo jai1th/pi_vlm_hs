@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "target_size": 560,
+  "aspect_mode": "stretch",
+  "pad_color": [114, 114, 114],
+  "crop_box": null,
+  "apply_exif_transpose": true,
+  "resample": "lanczos",
+  "jpeg_quality": 92
+}
