@@ -45,14 +45,16 @@ def parse_args():
     return p.parse_args()
 
 
-def run_once(source, client, servo, as_json, save_dir=None):
+def run_once(source, client, servo, as_json, save_dir=None, t0=None):
+    if t0 is None:
+        t0 = time.monotonic()
     image = source.grab()
     request_id = "cap-{}".format(uuid.uuid4().hex[:12])
     frame_path = save_frame(image, save_dir, request_id) if save_dir else None
     result = client.detect_pil(image, request_id=request_id)
     if as_json:
         print_result(result, as_json=True)
-    act_on_result(result, servo)
+    act_on_result(result, servo, t0)
     if frame_path:
         save_result(result, frame_path)
 
@@ -95,10 +97,11 @@ def main():
                 line = input("> ")
             except EOFError:
                 return 0
+            t0 = time.monotonic()  # Enter pressed
             if line.strip().lower() in ("q", "quit", "exit"):
                 return 0
             try:
-                run_once(source, client, servo, args.json, args.save_dir)
+                run_once(source, client, servo, args.json, args.save_dir, t0)
             except (VLMClientError, CaptureError, ServoError) as exc:
                 print("error: {}".format(exc), file=sys.stderr)
     except (VLMClientError, CaptureError, ServoError) as exc:
