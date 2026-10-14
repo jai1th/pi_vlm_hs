@@ -46,6 +46,7 @@ class OrbbecCapture:
         self.timeout_ms = timeout_ms
         self.skip_frames = skip_frames
         self._ob = None
+        self._ctx = None
         self._pipeline = None
 
     def open(self):
@@ -56,7 +57,8 @@ class OrbbecCapture:
         self._ob = ob
 
         try:
-            ctx = ob.Context()
+            # Keep the Context alive for as long as the pipeline runs.
+            self._ctx = ctx = ob.Context()
             if self.ip:
                 device = ctx.create_net_device(self.ip, self.port)
             else:
@@ -118,14 +120,18 @@ class OrbbecCapture:
 def list_devices():
     """Print every Orbbec device the SDK can discover (USB and network)."""
     import pyorbbecsdk as ob
-    devices = ob.Context().query_devices()
+    ctx = ob.Context()  # must outlive the device list
+    devices = ctx.query_devices()
     n = devices.get_count()
     print("{} device(s) found".format(n))
     for i in range(n):
-        info = devices.get_device_by_index(i).get_device_info()
-        print("  [{}] {} serial={} ip={}".format(
-            i, info.get_name(), info.get_serial_number(),
-            getattr(info, "get_ip_address", lambda: "?")()))
+        try:
+            info = devices.get_device_by_index(i).get_device_info()
+            print("  [{}] {} serial={} ip={}".format(
+                i, info.get_name(), info.get_serial_number(),
+                getattr(info, "get_ip_address", lambda: "?")()))
+        except Exception as exc:
+            print("  [{}] found, but could not read its info: {}".format(i, exc))
 
 
 def make_source(kind, image=None, camera_ip=None, camera_port=8090):
