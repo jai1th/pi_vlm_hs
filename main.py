@@ -28,8 +28,8 @@ from actions import CLEAR, STREAM_ANGLE, act_on_result
 from contamination_config import CONTAM_MODEL, SESSION_REFERENCE_PATH
 from results import print_result
 from servo import DEFAULT_SPEED_DPS, SERVO_PIN, Servo, ServoError
-from spectral_node import (As7265xSensor, SpectralError, SpectralNode, load_reference,
-                           save_reference)
+from spectral_node import (As7265xSensor, SpectralError, SpectralNode, calibrate_and_save,
+                           load_reference)
 from storage import save_frame, save_result
 from vlm_pi_client import DEFAULT_SERVER, PiVLMClient, VLMClientError
 
@@ -113,7 +113,7 @@ def calibrate(substrate, reference_path):
     sensor = As7265xSensor()
     try:
         sensor.open()
-        record = SpectralNode(sensor).calibrate_clean_reference(substrate)
+        calibrate_and_save(SpectralNode(sensor), substrate, reference_path)
     except SpectralError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 1
@@ -122,7 +122,6 @@ def calibrate(substrate, reference_path):
         return 1
     finally:
         sensor.close()
-    save_reference(record, reference_path)
     print("wrote {}".format(reference_path))
     return 0
 

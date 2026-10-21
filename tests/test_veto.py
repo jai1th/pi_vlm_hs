@@ -17,7 +17,8 @@ from unittest import mock
 import contamination_config as cfg
 from actions import CLEAR, GREEN, ROUTING, STREAM_ANGLE, act_on_result, route
 from servo import Servo, deg_to_us
-from spectral_node import SpectralNode, expected_settings, load_reference
+from spectral_node import (SpectralError, SpectralNode, calibrate_and_save, expected_settings,
+                           load_reference)
 from storage import UTC_FORMAT
 
 ALL_CHANNELS = "ABCDEFGHIJKLRSTUVW"
@@ -26,13 +27,21 @@ CLEAN_REF = 5388.5
 
 
 class FakeSensor:
-    """Returns the same calibrated level on the 13 retained channels and a
-    wild value on K L U V W, so including them would wreck every level."""
+    """Returns the same level on the 13 retained channels and a wild value on
+    K L U V W, so including them would wreck every level. Raw and calibrated
+    counts are equal; with the bulb off it reads `dark` when one is given.
+
+    readback_drop: fraction the lamp output falls when the registers are read
+    back while lit (1.0 = the readback kills the bulb).
+    sag_per_reading: fractional output loss per lit conversion (LED warming).
+    """
 
     def __init__(self, level=5388.0, replicate_levels=None, settings=None, fail=False,
-                 readback_kills_bulb=False):
+                 dark=None, readback_drop=0.0, sag_per_reading=0.0):
         self.level = level
-        self.readback_kills_bulb = readback_kills_bulb
+        self.dark = dark
+        self.readback_drop = readback_drop
+        self.sag_per_reading = sag_per_reading
         self.replicate_levels = list(replicate_levels or [])
         self.settings = settings
         self.fail = fail
@@ -50,19 +59,23 @@ class FakeSensor:
     def read_settings(self):
         self.calls.append("read_settings")
         settings = self.settings or expected_settings(bulb_on=self.white_on)
-        if self.readback_kills_bulb and self.white_on:
-            self.white_on = False   # registers still read "on"; the lamp is out
-            self.level = 10.0
+        if self.white_on:
+            self.level *= 1 - self.readback_drop   # registers still read "on"
         return settings
 
     def take_reading(self):
         self.calls.append("take_reading")
         if self.fail:
             raise TimeoutError("AS7265x data not ready")
-        level = self.replicate_levels.pop(0) if self.replicate_levels else self.level
+        if not self.white_on and self.dark is not None:
+            level = self.dark
+        elif self.replicate_levels:
+            level = self.replicate_levels.pop(0)
+        else:
+            level = self.level
+            self.level *= 1 - self.sag_per_reading
         calibrated = {ch: (50000.0 if ch in EXCLUDED else level) for ch in ALL_CHANNELS}
-        raw = {ch: int(v) for ch, v in calibrated.items()}
-        return raw, calibrated, {}
+        return dict(calibrated), calibrated, {}
 
 
 class FakeServo:
@@ -270,19 +283,74 @@ class ClassRoutingTests(VetoTestCase):
 
 
 class CheckSpectralTests(VetoTestCase):
-    def check(self, sensor):
+    def check(self, sensor, answer=""):
         node = self.node(sensor)
-        with contextlib.redirect_stdout(io.StringIO()):
-            return node.check_bulb_readback(prompt=lambda _: None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ok = node.check_bulb_readback(prompt=lambda _: answer)
+        self.output = out.getvalue()
+        return ok
 
     def test_healthy_readback_passes(self):
-        self.assertTrue(self.check(FakeSensor()))
+        self.assertTrue(self.check(FakeSensor(dark=4.5)))
 
     def test_readback_that_kills_the_bulb_fails(self):
-        self.assertFalse(self.check(FakeSensor(readback_kills_bulb=True)))
+        self.assertFalse(self.check(FakeSensor(readback_drop=1.0)))
+
+    def test_thermal_sag_alone_passes(self):
+        # ~0.9 % sag between legs: would fail a REPLICATE_CV_MAX (0.5 %) mark,
+        # but the readback leg sags no more than the control leg.
+        self.assertTrue(self.check(FakeSensor(sag_per_reading=0.003)))
+        self.assertIn("thermal_drift", self.output)
+
+    def test_readback_drop_beyond_thermal_fails(self):
+        # 3 % drop at the readback against no thermal drift: under the 5 %
+        # outright mark, but more than thermal_drift + 2 %.
+        self.assertFalse(self.check(FakeSensor(readback_drop=0.03)))
+
+    def test_numbers_printed_on_pass_and_fail(self):
+        for sensor in (FakeSensor(), FakeSensor(readback_drop=1.0)):
+            self.check(sensor)
+            self.assertIn("thermal_drift", self.output)
+            self.assertIn("readback_delta", self.output)
+
+    def test_cal_raw_table(self):
+        self.check(FakeSensor(dark=4.5))
+        for row in ("dark", "white", "sample"):
+            self.assertRegex(self.output, r"\n  {}\s+raw=".format(row))
+        self.check(FakeSensor(dark=4.5), answer="s")
+        self.assertNotRegex(self.output, r"\n  sample\s+raw=")
 
     def test_wrong_registers_fail(self):
         self.assertFalse(self.check(FakeSensor(settings=dict(expected_settings(True), gain=2))))
+
+
+class CalibrationTests(VetoTestCase):
+    def calibrate(self, sensor):
+        path = os.path.join(self.tmp, "session_reference.json")
+        node = self.node(sensor, ref=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                return calibrate_and_save(node, "carton", path, prompt=lambda _: ""), path
+            except SpectralError as exc:
+                return exc, path
+
+    def test_lit_white_tile_calibrates(self):
+        # dark raw 4.5, white raw 23331 -> ratio 5184
+        record, path = self.calibrate(FakeSensor(level=23331, dark=4.5))
+        self.assertIsInstance(record, dict)
+        with open(path) as f:
+            saved = json.load(f)
+        self.assertAlmostEqual(saved["white_raw_level"] / saved["dark_raw_level"], 5184.67, places=1)
+        for key in ("dark_raw_level", "white_raw_level", "white_flatness"):
+            self.assertIn(key, saved)
+
+    def test_dead_bulb_aborts_calibration(self):
+        # dark raw 10, white raw 12 -> ratio 1.2
+        error, path = self.calibrate(FakeSensor(level=12, dark=10))
+        self.assertIsInstance(error, SpectralError)
+        self.assertIn("1.2x", str(error))
+        self.assertFalse(os.path.exists(path))
 
 
 class FakePi:

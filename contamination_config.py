@@ -86,6 +86,19 @@ CAL_WHITE_REPLICATES = 3
 CAL_SEATINGS = 5
 CAL_SEATING_REPLICATES = 3
 CAL_MAX_RESEATS = 3          # unstable seatings re-prompted before calibration fails
+
+# Refuse to calibrate with a dead bulb. RAW counts, not calibrated: the only white/dark
+# records available are synthetic and their cal/raw ratio (0.005) disagrees with real
+# captures (0.78) by ~150x. Dark raw sits at ~4.5 counts and real sample raw runs
+# 290-15700, so a live white tile clears dark by more than 1000x. 100x is a wide guard
+# that still catches a dead bulb, where the ratio would be ~1.
+WHITE_DARK_RATIO_MIN = 100
+
+# --check-spectral pass marks. L1 -> L2 spans ~10 s of lit readings, over which the LED
+# junction warms and its output sags, so the readback is judged against a no-readback
+# thermal control leg rather than against replicate noise (REPLICATE_CV_MAX).
+READBACK_DELTA_MAX = 0.05          # fail outright above this level change across the readback
+READBACK_EXCESS_OVER_THERMAL = 0.02  # fail if readback_delta > thermal_drift + this
 REFERENCE_MAX_AGE_H = 12
 SESSION_REFERENCE_PATH = "session_reference.json"
 

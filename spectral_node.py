@@ -266,7 +266,7 @@ class SpectralNode:
                 self.sensor.disable_bulbs()
 
     def _replicates(self, acq, n, deadline=None):
-        """Take n conversions into `acq`; returns their calibrated counts."""
+        """Take n conversions into `acq`; returns their (raw, calibrated) counts."""
         start = len(acq["calibrated"])
         for _ in range(n):
             if deadline is not None and self._clock() >= deadline:
@@ -275,43 +275,53 @@ class SpectralNode:
             acq["raw"].append(raw)
             acq["calibrated"].append(calibrated)
             acq["ic_temperature_c"].append(temperatures)
-        return acq["calibrated"][start:]
+        return acq["raw"][start:], acq["calibrated"][start:]
 
     def check_bulb_readback(self, prompt=input):
         """Bench test for the register readback (main.py --check-spectral).
 
         The readback switches devices while the white bulb is lit, and
         referencer.py records a bulb-state defect in device-switching
-        sequences. So the measured quantity is the bulb surviving it: level
-        L1 on the PTFE tile, the readback, then level L2 with no reconfigure.
-        The register values are then compared with the bulb on and off.
-        Returns True when everything passes.
+        sequences. So the measured quantity is the bulb surviving it, judged
+        against a thermal control leg with no readback:
+
+            bulb on, settle; L1; L1' (control); readback; L2; bulb off; readback
+
+        The register values are compared with the bulb on and off, and a
+        cal/raw table (dark, white tile, optional clean sample) is printed as a
+        diagnostic. Returns True when the bulb and register checks pass.
         """
         prompt("Seat the PTFE tile, then press Enter. ")
         acq = _new_acquisition()
         try:
             self.sensor.enable_white()
             self._sleep(cfg.BULB_SETTLE_S)
-            l1 = level_of(self._replicates(acq, cfg.REPLICATES))
+            white = self._replicates(acq, cfg.REPLICATES)
+            l1 = level_of(white[1])
+            l1_control = level_of(self._replicates(acq, cfg.REPLICATES)[1])
             lit = self.sensor.read_settings()          # the suspect operation
-            l2 = level_of(self._replicates(acq, cfg.REPLICATES))
+            l2 = level_of(self._replicates(acq, cfg.REPLICATES)[1])
         finally:
             self.sensor.disable_bulbs()
         self._sleep(cfg.BULB_SETTLE_S)
-        dark = self.sensor.read_settings()
+        dark_settings = self.sensor.read_settings()
+        dark = self._replicates(acq, cfg.REPLICATES)
 
-        # Same bar as within one read: the readback must not move the level
-        # more than replicate noise is allowed to.
-        drop = (l1 - l2) / l1 if l1 > 0 else math.inf
-        bulb_ok = abs(drop) <= cfg.REPLICATE_CV_MAX
+        thermal_drift = (l1 - l1_control) / l1 if l1 > 0 else math.inf
+        readback_delta = (l1_control - l2) / l1_control if l1_control > 0 else math.inf
+        bulb_ok = (abs(readback_delta) <= cfg.READBACK_DELTA_MAX
+                   and readback_delta <= thermal_drift + cfg.READBACK_EXCESS_OVER_THERMAL)
         print("bulb survival on PTFE ({} replicates each):".format(cfg.REPLICATES))
-        print("  L1 before readback  {:10.1f}".format(l1))
-        print("  L2 after readback   {:10.1f}".format(l2))
-        print("  (L1-L2)/L1          {:+10.4f}  {} (|x| <= {})".format(
-            drop, "PASS" if bulb_ok else "FAIL", cfg.REPLICATE_CV_MAX))
+        print("  L1   before readback   {:10.1f}".format(l1))
+        print("  L1'  control, no readback {:7.1f}".format(l1_control))
+        print("  L2   after readback    {:10.1f}".format(l2))
+        print("  thermal_drift  (L1-L1')/L1   {:+8.4f}".format(thermal_drift))
+        print("  readback_delta (L1'-L2)/L1'  {:+8.4f}  {} (|x| <= {}, and <= thermal_drift + {})".format(
+            readback_delta, "PASS" if bulb_ok else "FAIL",
+            cfg.READBACK_DELTA_MAX, cfg.READBACK_EXCESS_OVER_THERMAL))
 
         registers_ok = True
-        for label, bulb_on, read in (("bulb on", True, lit), ("bulb off", False, dark)):
+        for label, bulb_on, read in (("bulb on", True, lit), ("bulb off", False, dark_settings)):
             expected = expected_settings(bulb_on)
             ok = read == expected
             registers_ok = registers_ok and ok
@@ -323,8 +333,31 @@ class SpectralNode:
                 print("  {:<20} expected {!s:<6} read {!s:<6}{}".format(
                     key, want, read.get(key), "" if read.get(key) == want else "  <--"))
 
-        self._log(None, None, acq, event="check_spectral", l1=l1, l2=l2, drop=drop,
-                  settings_lit=lit, settings_dark=dark)
+        # Diagnostic only, no pass/fail. Reference (dark, white) and sample
+        # readings should agree in cal/raw; if they don't, the calibrated-value
+        # path puts references and samples on different scales.
+        rows = [("dark", dark), ("white", white)]
+        answer = prompt("Optional: seat a clean carton for the cal/raw sample row and press "
+                        "Enter, or type s to skip. ")
+        if answer.strip().lower() != "s":
+            try:
+                self.sensor.enable_white()
+                self._sleep(cfg.BULB_SETTLE_S)
+                rows.append(("sample", self._replicates(acq, cfg.REPLICATES)))
+            finally:
+                self.sensor.disable_bulbs()
+        ratios = {}
+        print("cal/raw on the mean of the {} retained channels:".format(len(cfg.LEVEL_CHANNELS)))
+        for name, (raw, calibrated) in rows:
+            raw_level, cal_level = level_of(raw), level_of(calibrated)
+            ratios[name] = cal_level / raw_level if raw_level > 0 else None
+            print("  {:<7} raw={:<10.1f} cal={:<10.2f} cal/raw={}".format(
+                name, raw_level, cal_level,
+                "n/a" if ratios[name] is None else "{:.4f}".format(ratios[name])))
+
+        self._log(None, None, acq, event="check_spectral", l1=l1, l1_control=l1_control, l2=l2,
+                  thermal_drift=thermal_drift, readback_delta=readback_delta,
+                  settings_lit=lit, settings_dark=dark_settings, cal_raw_ratios=ratios)
         return bulb_ok and registers_ok
 
     def calibrate_clean_reference(self, substrate, prompt=input):
@@ -340,8 +373,25 @@ class SpectralNode:
 
         prompt("2/3 white: seat the PTFE tile, then press Enter. ")
         white = self._calibration_block(substrate, "white", True, cfg.CAL_WHITE_REPLICATES)
+
+        # A dead bulb here would poison clean_ref_level, and ILLUMINATION_FLOOR is
+        # a fraction of it, so nothing downstream could catch it. Raw counts: see
+        # WHITE_DARK_RATIO_MIN.
+        dark_raw, white_raw = level_of(dark["raw"]), level_of(white["raw"])
+        if dark_raw > 0:
+            ratio = white_raw / dark_raw
+        else:
+            ratio = math.inf if white_raw > 0 else 0.0
+        print("white/dark raw: {:.1f} / {:.1f} = {:.1f}".format(white_raw, dark_raw, ratio))
+        if ratio < cfg.WHITE_DARK_RATIO_MIN:
+            raise SpectralError(
+                "white tile raw level {:.1f} is only {:.1f}x dark raw level {:.1f} (need >= {}x): "
+                "is the bulb lit? Calibration aborted, no reference written".format(
+                    white_raw, ratio, dark_raw, cfg.WHITE_DARK_RATIO_MIN))
+
         # Clean PTFE is near-flat; a rising max/min means the tile is soiled.
-        white_means = [statistics.mean(rep[ch] for rep in white) for ch in cfg.LEVEL_CHANNELS]
+        white_means = [statistics.mean(rep[ch] for rep in white["calibrated"])
+                       for ch in cfg.LEVEL_CHANNELS]
         flatness = max(white_means) / min(white_means) if min(white_means) > 0 else math.inf
         print("white flatness (max/min over {} channels): {:.3f}".format(
             len(cfg.LEVEL_CHANNELS), flatness))
@@ -352,7 +402,7 @@ class SpectralNode:
                 prompt("3/3 seat clean {} object {}/{}, then press Enter. ".format(
                     substrate, i, cfg.CAL_SEATINGS))
                 seating = self._calibration_block(
-                    substrate, "seating_{}".format(i), True, cfg.CAL_SEATING_REPLICATES)
+                    substrate, "seating_{}".format(i), True, cfg.CAL_SEATING_REPLICATES)["calibrated"]
                 if max_cv(seating) <= cfg.REPLICATE_CV_MAX:
                     break
                 print("replicates unstable (max CV {:.4f} > {}): reseat and try again".format(
@@ -368,7 +418,9 @@ class SpectralNode:
             "config_clean_ref_level": config_level,
             "seating_levels": levels,
             "seating_cv": statistics.stdev(levels) / statistics.mean(levels),
-            "dark_level": level_of(dark),
+            "dark_level": level_of(dark["calibrated"]),
+            "dark_raw_level": dark_raw,
+            "white_raw_level": white_raw,
             "white_flatness": flatness,
             "timestamp": utc_timestamp(),
             "gain": cfg.GAIN,
@@ -392,7 +444,7 @@ class SpectralNode:
         if acq["settings"] != expected_settings(bulb_on):
             raise SpectralError("instrument_config_mismatch during {} block: read back {}".format(
                 phase, acq["settings"]))
-        return acq["calibrated"]
+        return acq
 
     def _finish(self, request_id, substrate, acq, reading, attempt=None):
         self._log(request_id, substrate, acq or _new_acquisition(), event="read",
@@ -421,6 +473,13 @@ def save_reference(record, path=cfg.SESSION_REFERENCE_PATH):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
         f.write("\n")
+
+
+def calibrate_and_save(node, substrate, path, prompt=input):
+    """Run the calibration and write `path` only if it completes."""
+    record = node.calibrate_clean_reference(substrate, prompt=prompt)
+    save_reference(record, path)
+    return record
 
 
 def load_reference(path, live_settings, now=None):
