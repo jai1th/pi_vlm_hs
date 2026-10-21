@@ -5,10 +5,17 @@
   python3 main.py --source orbbec --camera-ip ... --save-dir captures
   python3 main.py --source file --image test.jpg          # no camera needed
   python3 main.py --source orbbec --camera-ip ... --loop --interval 2
+  python3 main.py --check-spectral                        # bench test of the AS7265x readback
+  python3 main.py --calibrate                             # session spectral reference, then exit
+  python3 main.py --source file --image test.jpg --no-spectral --dry-run
+
+Run --calibrate at the start of each session: without a usable
+session_reference.json every GREEN-class item routes CLEAR (no_session_reference).
 
 Modules: capture.py (frames), vlm_pi_client.py (HTTP + preprocessing),
-actions.py (class -> servo angle), servo.py (pigpio servo), results.py (JSON print),
-storage.py (--save-dir).
+actions.py (decision node: class + spectral gate -> stream), spectral_node.py (AS7265x
+gate), contamination_config.py (veto constants), servo.py (pigpio servo),
+results.py (JSON print), storage.py (--save-dir, JSONL logs).
 """
 
 import argparse
@@ -17,9 +24,12 @@ import time
 import uuid
 
 from capture import CaptureError, make_source
-from actions import act_on_result
+from actions import CLEAR, STREAM_ANGLE, act_on_result
+from contamination_config import CONTAM_MODEL, SESSION_REFERENCE_PATH
 from results import print_result
 from servo import DEFAULT_SPEED_DPS, SERVO_PIN, Servo, ServoError
+from spectral_node import (As7265xSensor, SpectralError, SpectralNode, load_reference,
+                           save_reference)
 from storage import save_frame, save_result
 from vlm_pi_client import DEFAULT_SERVER, PiVLMClient, VLMClientError
 
@@ -42,10 +52,20 @@ def parse_args():
     p.add_argument("--dry-run", action="store_true", help="Print the servo action but do not move the servo")
     p.add_argument("--servo-speed", type=float, default=DEFAULT_SPEED_DPS, help="Servo speed in deg/s (default: medium)")
     p.add_argument("--servo-pin", type=int, default=SERVO_PIN, help="GPIO (BCM) pin of the servo signal")
+    p.add_argument("--calibrate", action="store_true",
+                   help="Run the interactive spectral calibration, write --reference and exit")
+    p.add_argument("--substrate", choices=sorted(CONTAM_MODEL), default="carton",
+                   help="Substrate to calibrate (with --calibrate)")
+    p.add_argument("--reference", default=SESSION_REFERENCE_PATH,
+                   help="Session spectral reference written by --calibrate")
+    p.add_argument("--check-spectral", action="store_true",
+                   help="Bench test: does the register readback read correctly and leave the bulb lit? Then exit")
+    p.add_argument("--no-spectral", action="store_true",
+                   help="Run without the AS7265x (same as a missing reference: GREEN classes route CLEAR)")
     return p.parse_args()
 
 
-def run_once(source, client, servo, as_json, save_dir=None, t0=None):
+def run_once(source, client, spectral, servo, as_json, save_dir=None, t0=None):
     if t0 is None:
         t0 = time.monotonic()
     image = source.grab()
@@ -54,9 +74,73 @@ def run_once(source, client, servo, as_json, save_dir=None, t0=None):
     result = client.detect_pil(image, request_id=request_id)
     if as_json:
         print_result(result, as_json=True)
-    act_on_result(result, servo, t0)
+    act_on_result(result, spectral, servo, t0)
     if frame_path:
         save_result(result, frame_path)
+
+
+def warn_no_reference(why):
+    print("=" * 72, file=sys.stderr)
+    print("WARNING: no usable spectral reference: {}".format(why), file=sys.stderr)
+    print("         every GREEN-class item will route CLEAR (no_session_reference)", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+
+
+def open_spectral(no_spectral, reference_path):
+    """Start the AS7265x and load the session reference. Never prompts. Every
+    failure leaves a node without a reference, which routes conservatively."""
+    if no_spectral:
+        warn_no_reference("--no-spectral")
+        return SpectralNode()
+    sensor = As7265xSensor()
+    try:
+        sensor.open()
+        live = sensor.read_settings()
+    except Exception as exc:
+        sensor.close()
+        warn_no_reference("AS7265x unavailable: {}".format(exc))
+        return SpectralNode()
+    reference, why = load_reference(reference_path, live)
+    if reference is None:
+        warn_no_reference(why)
+    else:
+        print("spectral reference: {} clean_ref_level={:.1f} taken {}".format(
+            reference["substrate"], reference["clean_ref_level"], reference["timestamp"]))
+    return SpectralNode(sensor, reference)
+
+
+def calibrate(substrate, reference_path):
+    sensor = As7265xSensor()
+    try:
+        sensor.open()
+        record = SpectralNode(sensor).calibrate_clean_reference(substrate)
+    except SpectralError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 1
+    except (KeyboardInterrupt, EOFError):
+        print("calibration aborted; {} not written".format(reference_path), file=sys.stderr)
+        return 1
+    finally:
+        sensor.close()
+    save_reference(record, reference_path)
+    print("wrote {}".format(reference_path))
+    return 0
+
+
+def check_spectral():
+    sensor = As7265xSensor()
+    try:
+        sensor.open()
+        ok = SpectralNode(sensor).check_bulb_readback()
+    except (KeyboardInterrupt, EOFError):
+        return 1
+    except Exception as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 1
+    finally:
+        sensor.close()
+    print("check-spectral: {}".format("PASS" if ok else "FAIL"))
+    return 0 if ok else 1
 
 
 def main():
@@ -65,23 +149,32 @@ def main():
         from capture import list_devices
         list_devices()
         return 0
+    if args.check_spectral:
+        return check_spectral()
+    if args.calibrate:
+        return calibrate(args.substrate, args.reference)
     try:
         source = make_source(args.source, args.image, args.camera_ip, args.camera_port)
         client = PiVLMClient(args.config, args.server)
-        servo = None if args.dry_run else Servo(pin=args.servo_pin, speed_dps=args.servo_speed)
+        # The diverter rests at CLEAR: whatever is never actuated goes to landfill.
+        servo = None if args.dry_run else Servo(pin=args.servo_pin, speed_dps=args.servo_speed,
+                                                rest_deg=STREAM_ANGLE[CLEAR])
     except (CaptureError, ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
 
+    spectral = None
     try:
         source.open()
         client.check_ready()
+        spectral = open_spectral(args.no_spectral, args.reference)
         if servo:
             servo.open()
+            print("diverter parked at CLEAR ({:+d} deg)".format(STREAM_ANGLE[CLEAR]))
         if args.once or args.loop:
             while True:
                 try:
-                    run_once(source, client, servo, args.json, args.save_dir)
+                    run_once(source, client, spectral, servo, args.json, args.save_dir)
                 except (VLMClientError, CaptureError, ServoError) as exc:
                     print("error: {}".format(exc), file=sys.stderr)
                     if args.once:
@@ -101,7 +194,7 @@ def main():
             if line.strip().lower() in ("q", "quit", "exit"):
                 return 0
             try:
-                run_once(source, client, servo, args.json, args.save_dir, t0)
+                run_once(source, client, spectral, servo, args.json, args.save_dir, t0)
             except (VLMClientError, CaptureError, ServoError) as exc:
                 print("error: {}".format(exc), file=sys.stderr)
     except (VLMClientError, CaptureError, ServoError) as exc:
@@ -112,6 +205,8 @@ def main():
     finally:
         source.close()
         client.close()
+        if spectral and spectral.sensor:
+            spectral.sensor.close()
         if servo:
             servo.close()
 

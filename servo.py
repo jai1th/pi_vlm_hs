@@ -14,7 +14,7 @@ US_PER_DEG = 400 / 45           # Hitec: ~400 us per 45 deg
 MIN_DEG, MAX_DEG = -90, 90
 
 DEFAULT_SPEED_DPS = 90.0        # "medium": a full 90 deg sweep takes ~1 s
-HOLD_S = 1.0                    # time spent at the target before returning home
+HOLD_S = 1.0                    # time spent at the target before returning to rest
 STEP_S = 0.02                   # one servo frame (50 Hz)
 
 
@@ -28,19 +28,20 @@ def deg_to_us(deg):
 
 class Servo:
     def __init__(self, pin=SERVO_PIN, speed_dps=DEFAULT_SPEED_DPS, hold_s=HOLD_S,
-                 host="::1", port=8888, pi=None):
+                 rest_deg=0.0, host="::1", port=8888, pi=None):
         if speed_dps <= 0:
             raise ValueError("servo speed must be > 0 deg/s")
         self.pin = pin
         self.speed_dps = speed_dps
         self.hold_s = hold_s
+        self.rest_deg = max(MIN_DEG, min(MAX_DEG, rest_deg))
         self.host = host
         self.port = port
         self._pi = pi
         self._angle = 0.0
 
     def open(self):
-        """Connect to pigpiod and put the servo at home (0 deg)."""
+        """Connect to pigpiod and park the servo at its rest angle."""
         if self._pi is None:
             try:
                 import pigpio
@@ -49,7 +50,7 @@ class Servo:
             self._pi = pigpio.pi(self.host, self.port)
         if not self._pi.connected:
             raise ServoError("pigpiod not running: sudo systemctl start pigpiod")
-        self._set(0.0)
+        self._set(self.rest_deg)
 
     def _set(self, angle):
         self._angle = angle
@@ -68,11 +69,14 @@ class Servo:
             time.sleep(duration / steps)
 
     def swing(self, target_deg):
-        """Go to target_deg, stay hold_s seconds, return to 0. Blocks until home."""
+        """Go to target_deg, stay hold_s seconds, return to rest. Blocks until
+        back at rest; a target equal to the rest angle is a no-op."""
         target = max(MIN_DEG, min(MAX_DEG, target_deg))
+        if target == self.rest_deg:
+            return
         self._ramp(target)
         time.sleep(self.hold_s)
-        self._ramp(0.0)
+        self._ramp(self.rest_deg)
 
     def close(self):
         if self._pi is not None:

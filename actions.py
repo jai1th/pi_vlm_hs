@@ -1,62 +1,147 @@
-"""Class -> servo action. Edit ACTIONS to change what each class does.
+"""Decision node: class -> stream, gated by the spectral contamination veto.
+
+    VLM (proposer)    -> object label + bbox
+    spectral (gate)   -> contamination tri-state (spectral_node.py)
+    decision node     -> owns ALL routing logic (this file)
+
+route() is pure and deterministic: the SpectralReading is passed in, the sensor
+is never called inside it, and every failure mode routes CLEAR.
 
 Direction follows servo_test.py (Left key = negative angle, Right = positive):
   GREEN bin = left  = -90 deg
   CLEAR bin = right = +90 deg
-After the move the servo holds for 1 s and returns to 0 (see servo.py).
+The diverter rests at CLEAR (main.py parks it there at startup), so anything
+that is never actuated goes CLEAR. A GREEN decision swings to -90, holds 1 s and
+returns to rest; a CLEAR decision needs no movement (see servo.py).
 
-The model outputs 9 classes. togo_box and togo_cup each span both bins in the
-routing split, so they follow the majority of their TACO source classes:
-  togo_box = Meal carton, Pizza box, Disposable food container (GREEN)
-             + Foam food container (CLEAR)                      -> GREEN
-  togo_cup = Paper cup, Foam cup (CLEAR)
-             + Disposable plastic cup (GREEN)                   -> CLEAR
+The model outputs 9 classes. togo_cup spans both bins in the original routing
+split (Paper cup, Foam cup -> CLEAR; Disposable plastic cup -> GREEN) and
+follows the majority -> CLEAR.
 """
 
 import time
 
-GREEN = -90   # left
-CLEAR = +90   # right
+from contamination_config import DECISION_LOG_PATH, GATE_NOT_IMPLEMENTED, SUBSTRATE_OF
+from storage import append_jsonl, utc_timestamp
 
-ACTIONS = {
-    "togo_box": GREEN,
+GREEN = "green"
+CLEAR = "clear"
+
+STREAM_ANGLE = {
+    GREEN: -90,   # left
+    CLEAR: +90,   # right
+}
+
+# togo_box is GREEN for the POC on the assumption of CARTON stock. The class also spans
+# EPS foam and PET, which have different clean baselines; a foam box would be given the
+# carton reference and produce a meaningless d. Showcase with carton boxes only.
+ROUTING = {
+    "togo_box":       GREEN,
     "plastic_bottle": GREEN,
-    "paper": GREEN,
-
-    "togo_cup": CLEAR,
-    "cup_lid": CLEAR,
-    "straw": CLEAR,
-    "tissue": CLEAR,
-    "wrapper": CLEAR,
-    "glass_bottle": CLEAR,
+    "paper":          GREEN,
+    "togo_cup":       CLEAR,
+    "cup_lid":        CLEAR,
+    "straw":          CLEAR,
+    "tissue":         CLEAR,
+    "wrapper":        CLEAR,
+    "glass_bottle":   CLEAR,
 }
 
 
-def act_on_result(result, servo=None, t0=None):
-    """Act on the first detected object; servo=None only prints (dry run).
+def class_route(objects):
+    """The class-only part of route(). Returns (stream, reason) when the labels
+    alone decide, or None when the frame needs the spectral gate.
 
-    The servo can only do one thing per frame, so extra objects are listed
-    but ignored. Returns the angle used, or None if nothing was done.
-
-    t0 is a time.monotonic() value taken at the Enter press; the elapsed time
-    to the decision is printed before the servo moves, so actuation is not
-    included.
+    There is one physical object per frame, but the VLM may draw several boxes
+    with conflicting labels for it; the most conservative label wins.
     """
-    took = "" if t0 is None else " [decision in {:.2f} s]".format(time.monotonic() - t0)
+    streams = {ROUTING.get(o["label"]) for o in objects}
+    if not streams:
+        return CLEAR, "no_detection"
+    if None in streams:
+        return CLEAR, "unknown_label"
+    if CLEAR in streams:
+        return CLEAR, "class_landfill"   # also covers a GREEN/CLEAR label conflict
+    if any(o["label"] in GATE_NOT_IMPLEMENTED for o in objects):
+        return CLEAR, "gate_not_implemented"
+    return None
+
+
+def substrate_of(objects):
+    """Substrate to read, from the label map only. Labels that disagree on a
+    substrate give None (uncharacterized) rather than a guess."""
+    substrates = {SUBSTRATE_OF.get(o["label"]) for o in objects}
+    return substrates.pop() if len(substrates) == 1 else None
+
+
+def route(objects, reading=None):
+    """(stream, reason) for one frame. `reading` is required exactly when
+    class_route() returns None.
+
+    TODO: the VLM's per-object `contaminated` flag would apply only where no
+    spectral model exists. It is dead until the server passes it through (it is
+    dropped in vlm_server detect.py) and the model has seen contamination
+    positives. Never fuse it with the spectral state.
+    """
+    decided = class_route(objects)
+    if decided is not None:
+        return decided
+    if reading is None:
+        raise ValueError("this frame needs a spectral reading")
+    if reading.state is None:
+        return CLEAR, reading.reason
+    if reading.state:
+        return CLEAR, "contamination_veto"
+    return GREEN, "class_recyclable_clean"
+
+
+def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_PATH):
+    """Route one frame, log the decision and move the servo; servo=None only
+    prints (dry run). An empty frame is logged but never actuates: in --loop
+    it is the common case, and the diverter already rests at CLEAR.
+    Returns (stream, reason).
+
+    The spectral read happens only when the classes leave it undecided, so
+    CLEAR-routing classes never pay its latency. t0 is a time.monotonic() value
+    taken at the Enter press; the elapsed time to the decision (spectral read
+    included) is printed before the servo moves, so actuation is not included.
+    """
     objects = result.get("objects", [])
+    labels = [o["label"] for o in objects]
+    request_id = result.get("request_id", "?")
+
+    reading = None
+    if class_route(objects) is None:
+        reading = spectral.read_contamination(substrate_of(objects), request_id=request_id)
+    stream, reason = route(objects, reading)
+    angle = STREAM_ANGLE[stream]
+    elapsed = None if t0 is None else time.monotonic() - t0
+
+    append_jsonl(log_path, {
+        "timestamp": utc_timestamp(),
+        "request_id": request_id,
+        "n_detections": len(objects),
+        "labels": labels,
+        "stream": stream,
+        "angle": angle,
+        "reason": reason,
+        "spectral": None if reading is None else {
+            "state": reading.state, "d": reading.d, "level": reading.level,
+            "reason": reading.reason},
+        "reference_timestamp": (spectral.reference or {}).get("timestamp"),
+        "decision_s": elapsed,
+    })
+
+    took = "" if elapsed is None else " [decision in {:.2f} s]".format(elapsed)
     if not objects:
-        print("[{}] no objects detected: no action{}".format(result.get("request_id", "?"), took))
-        return None
+        print("[{}] no objects detected: no action{}".format(request_id, took))
+        return stream, reason
 
-    label = objects[0]["label"]
-    others = [o["label"] for o in objects[1:]]
-    angle = ACTIONS.get(label)
-    note = " (ignoring: {})".format(", ".join(others)) if others else ""
-    if angle is None:
-        print("{}: no action assigned{}{}".format(label, note, took))
-        return None
-
-    print("{} -> {:+d} deg{}, hold 1 s, home{}".format(label, angle, took, note))
+    gate = "" if reading is None or reading.d is None else " d={:+.3f}".format(reading.d)
+    move = ", hold 1 s, back to rest" if stream == GREEN else ", rest position"
+    print("[{}] {} detection(s): {} -> {} {:+d} deg ({}){}{}{}".format(
+        request_id, len(objects), ", ".join(labels),
+        stream.upper(), angle, reason, gate, took, move))
     if servo is not None:
         servo.swing(angle)
-    return angle
+    return stream, reason

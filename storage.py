@@ -21,3 +21,17 @@ def save_result(result, frame_path):
         json.dump(result, f, indent=2)
         f.write("\n")
     return path
+
+
+UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def utc_timestamp():
+    return time.strftime(UTC_FORMAT, time.gmtime())
+
+
+def append_jsonl(path, record):
+    """Append one record as a JSON line, creating the directory if needed."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
