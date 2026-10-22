@@ -24,7 +24,7 @@ import time
 import uuid
 
 from capture import CaptureError, make_source
-from actions import CLEAR, STREAM_ANGLE, act_on_result
+from actions import act_on_result
 from contamination_config import CONTAM_MODEL, SESSION_REFERENCE_PATH
 from results import print_result
 from servo import DEFAULT_SPEED_DPS, SERVO_PIN, Servo, ServoError
@@ -155,9 +155,7 @@ def main():
     try:
         source = make_source(args.source, args.image, args.camera_ip, args.camera_port)
         client = PiVLMClient(args.config, args.server)
-        # The diverter rests at CLEAR: whatever is never actuated goes to landfill.
-        servo = None if args.dry_run else Servo(pin=args.servo_pin, speed_dps=args.servo_speed,
-                                                rest_deg=STREAM_ANGLE[CLEAR])
+        servo = None if args.dry_run else Servo(pin=args.servo_pin, speed_dps=args.servo_speed)
     except (CaptureError, ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
@@ -169,7 +167,6 @@ def main():
         spectral = open_spectral(args.no_spectral, args.reference)
         if servo:
             servo.open()
-            print("diverter parked at CLEAR ({:+d} deg)".format(STREAM_ANGLE[CLEAR]))
         if args.once or args.loop:
             while True:
                 try:

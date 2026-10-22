@@ -8,11 +8,10 @@ route() is pure and deterministic: the SpectralReading is passed in, the sensor
 is never called inside it, and every failure mode routes CLEAR.
 
 Direction follows servo_test.py (Left key = negative angle, Right = positive):
-  GREEN bin = left  = -90 deg
-  CLEAR bin = right = +90 deg
-The diverter rests at CLEAR (main.py parks it there at startup), so anything
-that is never actuated goes CLEAR. A GREEN decision swings to -90, holds 1 s and
-returns to rest; a CLEAR decision needs no movement (see servo.py).
+  CLEAR bin = left  = -90 deg
+  GREEN bin = right = +90 deg
+The diverter rests at 0. Every routed frame swings to its bin, holds 1 s and
+returns to 0 (see servo.py); an empty frame does not move it.
 
 The model outputs 9 classes. togo_cup spans both bins in the original routing
 split (Paper cup, Foam cup -> CLEAR; Disposable plastic cup -> GREEN) and
@@ -28,8 +27,8 @@ GREEN = "green"
 CLEAR = "clear"
 
 STREAM_ANGLE = {
-    GREEN: -90,   # left
-    CLEAR: +90,   # right
+    CLEAR: -90,   # left
+    GREEN: +90,   # right
 }
 
 # togo_box is GREEN for the POC on the assumption of CARTON stock. The class also spans
@@ -98,7 +97,7 @@ def route(objects, reading=None):
 def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_PATH):
     """Route one frame, log the decision and move the servo; servo=None only
     prints (dry run). An empty frame is logged but never actuates: in --loop
-    it is the common case, and the diverter already rests at CLEAR.
+    it is the common case, and there is nothing to divert.
     Returns (stream, reason).
 
     The spectral read happens only when the classes leave it undecided, so
@@ -138,10 +137,9 @@ def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_P
         return stream, reason
 
     gate = "" if reading is None or reading.d is None else " d={:+.3f}".format(reading.d)
-    move = ", hold 1 s, back to rest" if stream == GREEN else ", rest position"
-    print("[{}] {} detection(s): {} -> {} {:+d} deg ({}){}{}{}".format(
+    print("[{}] {} detection(s): {} -> {} {:+d} deg ({}){}{}, hold 1 s, home".format(
         request_id, len(objects), ", ".join(labels),
-        stream.upper(), angle, reason, gate, took, move))
+        stream.upper(), angle, reason, gate, took))
     if servo is not None:
         servo.swing(angle)
     return stream, reason

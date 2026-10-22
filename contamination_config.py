@@ -83,7 +83,8 @@ SENSOR_RETRIES = 1           # driver exceptions / timeouts only, never replicat
 
 CAL_DARK_REPLICATES = 3
 CAL_WHITE_REPLICATES = 3
-CAL_SEATINGS = 5
+CAL_SEATINGS = 5             # placements of one clean object; 1 is allowed but loses
+                             # the placement spread (seating_cv is then not recorded)
 CAL_SEATING_REPLICATES = 3
 CAL_MAX_RESEATS = 3          # unstable seatings re-prompted before calibration fails
 

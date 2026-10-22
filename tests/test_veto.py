@@ -132,7 +132,7 @@ class SpectralGateTests(VetoTestCase):
     def test_clean_carton_routes_green(self):
         sensor = FakeSensor(level=5388)
         self.assertEqual(self.decide(["togo_box"], sensor),
-                         (GREEN, "class_recyclable_clean", [-90]))
+                         (GREEN, "class_recyclable_clean", [STREAM_ANGLE[GREEN]]))
         self.assertEqual(sensor.calls.count("take_reading"), cfg.REPLICATES)
 
     def test_darkened_carton_is_vetoed(self):
@@ -230,7 +230,8 @@ class ClassRoutingTests(VetoTestCase):
         for label in [l for l, s in ROUTING.items() if s == CLEAR]:
             with self.subTest(label=label):
                 sensor = FakeSensor()
-                self.assertEqual(self.decide([label], sensor), (CLEAR, "class_landfill", [90]))
+                self.assertEqual(self.decide([label], sensor),
+                                 (CLEAR, "class_landfill", [STREAM_ANGLE[CLEAR]]))
                 self.assertEqual(sensor.calls, [])
 
     def test_togo_cup_skips_the_sensor(self):
@@ -345,6 +346,12 @@ class CalibrationTests(VetoTestCase):
         for key in ("dark_raw_level", "white_raw_level", "white_flatness"):
             self.assertIn(key, saved)
 
+    def test_single_placement_calibrates(self):
+        with mock.patch.object(cfg, "CAL_SEATINGS", 1):
+            record, _ = self.calibrate(FakeSensor(level=5600, dark=5.7))
+        self.assertEqual(record["seating_levels"], [5600])
+        self.assertIsNone(record["seating_cv"])
+
     def test_dead_bulb_aborts_calibration(self):
         # dark raw 10, white raw 12 -> ratio 1.2
         error, path = self.calibrate(FakeSensor(level=12, dark=10))
@@ -364,27 +371,27 @@ class FakePi:
 
 
 @mock.patch("servo.time.sleep", lambda s: None)
-class DiverterRestTests(unittest.TestCase):
+class DiverterTests(unittest.TestCase):
     def servo(self):
         pi = FakePi()
-        servo = Servo(rest_deg=STREAM_ANGLE[CLEAR], pi=pi)
+        servo = Servo(pi=pi)
         servo.open()
         return servo, pi
 
-    def test_parks_at_clear_on_open(self):
+    def test_directions(self):
+        self.assertEqual(STREAM_ANGLE, {CLEAR: -90, GREEN: +90})
+
+    def test_rests_at_zero_on_open(self):
         _, pi = self.servo()
-        self.assertEqual(pi.pulses, [deg_to_us(STREAM_ANGLE[CLEAR])])
+        self.assertEqual(pi.pulses, [deg_to_us(0)])
 
-    def test_green_swing_returns_to_clear(self):
-        servo, pi = self.servo()
-        servo.swing(STREAM_ANGLE[GREEN])
-        self.assertIn(deg_to_us(STREAM_ANGLE[GREEN]), pi.pulses)
-        self.assertEqual(pi.pulses[-1], deg_to_us(STREAM_ANGLE[CLEAR]))
-
-    def test_clear_swing_does_not_move(self):
-        servo, pi = self.servo()
-        servo.swing(STREAM_ANGLE[CLEAR])
-        self.assertEqual(len(pi.pulses), 1)
+    def test_both_streams_swing_and_return_home(self):
+        for stream in (CLEAR, GREEN):
+            with self.subTest(stream=stream):
+                servo, pi = self.servo()
+                servo.swing(STREAM_ANGLE[stream])
+                self.assertIn(deg_to_us(STREAM_ANGLE[stream]), pi.pulses)
+                self.assertEqual(pi.pulses[-1], deg_to_us(0))
 
 
 class SessionReferenceTests(VetoTestCase):

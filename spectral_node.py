@@ -389,18 +389,21 @@ class SpectralNode:
                 "is the bulb lit? Calibration aborted, no reference written".format(
                     white_raw, ratio, dark_raw, cfg.WHITE_DARK_RATIO_MIN))
 
-        # Clean PTFE is near-flat; a rising max/min means the tile is soiled.
+        # max/min over the retained channels of the white-tile signal. This is
+        # LED spectrum x tile x detector, not reflectance, so it is large by
+        # design (the white LED is weak at the band edges). Only its trend across
+        # sessions means anything: a rising value suggests a soiled tile.
         white_means = [statistics.mean(rep[ch] for rep in white["calibrated"])
                        for ch in cfg.LEVEL_CHANNELS]
         flatness = max(white_means) / min(white_means) if min(white_means) > 0 else math.inf
-        print("white flatness (max/min over {} channels): {:.3f}".format(
+        print("white flatness (max/min over {} channels; compare across sessions, not to 1): {:.3f}".format(
             len(cfg.LEVEL_CHANNELS), flatness))
 
         levels = []
         for i in range(1, cfg.CAL_SEATINGS + 1):
             for _ in range(cfg.CAL_MAX_RESEATS):
-                prompt("3/3 seat clean {} object {}/{}, then press Enter. ".format(
-                    substrate, i, cfg.CAL_SEATINGS))
+                prompt("3/3 place the clean {} (placement {}/{}; reseat the same object "
+                       "each time), then press Enter. ".format(substrate, i, cfg.CAL_SEATINGS))
                 seating = self._calibration_block(
                     substrate, "seating_{}".format(i), True, cfg.CAL_SEATING_REPLICATES)["calibrated"]
                 if max_cv(seating) <= cfg.REPLICATE_CV_MAX:
@@ -417,7 +420,9 @@ class SpectralNode:
             "clean_ref_level": statistics.mean(levels),
             "config_clean_ref_level": config_level,
             "seating_levels": levels,
-            "seating_cv": statistics.stdev(levels) / statistics.mean(levels),
+            # Spread across placements; needs at least two.
+            "seating_cv": (statistics.stdev(levels) / statistics.mean(levels)
+                           if len(levels) > 1 else None),
             "dark_level": level_of(dark["calibrated"]),
             "dark_raw_level": dark_raw,
             "white_raw_level": white_raw,
@@ -428,8 +433,10 @@ class SpectralNode:
             "bulb_current": cfg.WHITE_BULB_CURRENT,
         }
         append_jsonl(self.log_path, dict(record, event="calibration_result"))
-        print("clean_ref_level: measured {:.1f}, config {:.1f} (box-to-box CV {:.4f})".format(
-            record["clean_ref_level"], config_level, record["seating_cv"]))
+        spread = record["seating_cv"]
+        print("clean_ref_level: measured {:.1f}, config {:.1f} ({})".format(
+            record["clean_ref_level"], config_level,
+            "placement CV n/a, 1 placement" if spread is None else "placement CV {:.4f}".format(spread)))
         self.reference = record
         return record
 
