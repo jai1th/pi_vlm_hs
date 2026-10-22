@@ -1,4 +1,11 @@
-/__pycache__
+__pycache__/
 /logs
 /session_reference.json
-/tests/__pycache__
+
+# Only scripts go in git: no captures, results or session data.
+*.jpg
+*.jpeg
+*.png
+*.json
+!config/preprocess.json
+veto_integration_spec.md
