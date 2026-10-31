@@ -73,7 +73,8 @@ LEVEL_CHANNELS = ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "R", "S", "T
 
 # --- Read sequence ---------------------------------------------------------------
 
-REPLICATES = 3
+REPLICATES = 3               # default for routing reads; main.py --readings overrides it
+MIN_REPLICATES = 2           # the replicate CV check needs a spread
 BULB_SETTLE_S = 0.20         # same settle the channel-usability run used
 CONVERSION_TIMEOUT_S = 3.0   # per conversion (DATA_RDY poll)
 READ_BUDGET_S = 12.0         # whole replicate sequence including bulb settling

@@ -221,6 +221,18 @@ class SpectralGateTests(VetoTestCase):
                          (CLEAR, "instrument_config_mismatch"))
         self.assertNotIn("take_reading", sensor.calls)
 
+    def test_reading_count_is_configurable(self):
+        sensor = FakeSensor(level=5388)
+        node = SpectralNode(sensor, reference(), log_path=os.path.join(self.tmp, "spectral.jsonl"),
+                            sleep=lambda s: None, clock=itertools.count().__next__, replicates=2)
+        self.assertEqual(self.decide(["togo_box"], node=node)[:2], (GREEN, "class_recyclable_clean"))
+        self.assertEqual(sensor.calls.count("take_reading"), 2)
+        self.assertIn("over 2 reading(s)", self.output)
+
+    def test_one_reading_is_refused(self):
+        with self.assertRaises(ValueError):
+            SpectralNode(FakeSensor(), reference(), replicates=1)
+
     def test_timing_printed_and_logged(self):
         self.decide(["togo_box"], FakeSensor(level=5388))
         self.assertIn("vlm 1.23 s | sensor: conversion 1.20 s, readout 0.30 s over 3 reading(s)",

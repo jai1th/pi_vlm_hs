@@ -223,10 +223,16 @@ class SpectralNode:
 
     sensor=None (--no-spectral) behaves exactly like a missing session
     reference: every substrate with a model reads as no_session_reference.
+    replicates is the number of conversions per routing read (main.py
+    --readings); calibration and --check-spectral keep their own counts.
     """
 
     def __init__(self, sensor=None, reference=None, log_path=cfg.SPECTRAL_LOG_PATH,
-                 sleep=time.sleep, clock=time.monotonic):
+                 sleep=time.sleep, clock=time.monotonic, replicates=cfg.REPLICATES):
+        if replicates < cfg.MIN_REPLICATES:
+            raise ValueError("a read needs at least {} readings for the replicate CV check, got {}"
+                             .format(cfg.MIN_REPLICATES, replicates))
+        self.replicates = replicates
         self.sensor = sensor
         self.reference = reference if sensor is not None else None
         self.log_path = log_path
@@ -304,7 +310,7 @@ class SpectralNode:
                 break
             acq = _new_acquisition()
             try:
-                self._acquire(acq, deadline, bulb_on=True, replicates=cfg.REPLICATES)
+                self._acquire(acq, deadline, bulb_on=True, replicates=self.replicates)
             except ReadCancelled:
                 return self._finish(request_id, substrate, acq,
                                     _no_reading("read_cancelled"), attempt=attempt)

@@ -8,6 +8,7 @@
   python3 main.py --check-spectral                        # bench test of the AS7265x readback
   python3 main.py --calibrate                             # session spectral reference, then exit
   python3 main.py --source file --image test.jpg --no-spectral --dry-run
+  python3 main.py --source orbbec --readings 2            # 2 spectral readings per item (default 3)
 
 Run --calibrate at the start of each session: without a usable
 session_reference.json every GREEN-class item routes CLEAR (no_session_reference).
@@ -25,13 +26,21 @@ import uuid
 
 from capture import CaptureError, make_source
 from actions import act_on_result
-from contamination_config import CONTAM_MODEL, SESSION_REFERENCE_PATH
+from contamination_config import CONTAM_MODEL, MIN_REPLICATES, REPLICATES, SESSION_REFERENCE_PATH
 from results import print_result
 from servo import DEFAULT_SPEED_DPS, SERVO_PIN, Servo, ServoError
 from spectral_node import (As7265xSensor, SpectralError, SpectralNode, calibrate_and_save,
                            load_reference)
 from storage import save_frame, save_result
 from vlm_pi_client import DEFAULT_SERVER, PiVLMClient, VLMClientError
+
+
+def reading_count(text):
+    n = int(text)
+    if n < MIN_REPLICATES:
+        raise argparse.ArgumentTypeError(
+            "need at least {} readings: the replicate CV check needs a spread".format(MIN_REPLICATES))
+    return n
 
 
 def parse_args():
@@ -60,6 +69,9 @@ def parse_args():
                    help="Session spectral reference written by --calibrate")
     p.add_argument("--check-spectral", action="store_true",
                    help="Bench test: does the register readback read correctly and leave the bulb lit? Then exit")
+    p.add_argument("--readings", type=reading_count, default=REPLICATES,
+                   help="Spectral readings per item (default {}, min {}); calibration is "
+                        "unaffected".format(REPLICATES, MIN_REPLICATES))
     p.add_argument("--no-spectral", action="store_true",
                    help="Run without the AS7265x (same as a missing reference: GREEN classes route CLEAR)")
     return p.parse_args()
@@ -94,7 +106,7 @@ def warn_no_reference(why):
     print("=" * 72, file=sys.stderr)
 
 
-def open_spectral(no_spectral, reference_path):
+def open_spectral(no_spectral, reference_path, readings=REPLICATES):
     """Start the AS7265x and load the session reference. Never prompts. Every
     failure leaves a node without a reference, which routes conservatively."""
     if no_spectral:
@@ -114,7 +126,7 @@ def open_spectral(no_spectral, reference_path):
     else:
         print("spectral reference: {} clean_ref_level={:.1f} taken {}".format(
             reference["substrate"], reference["clean_ref_level"], reference["timestamp"]))
-    return SpectralNode(sensor, reference)
+    return SpectralNode(sensor, reference, replicates=readings)
 
 
 def calibrate(substrate, reference_path):
@@ -172,7 +184,7 @@ def main():
     try:
         source.open()
         client.check_ready()
-        spectral = open_spectral(args.no_spectral, args.reference)
+        spectral = open_spectral(args.no_spectral, args.reference, args.readings)
         if servo:
             servo.open()
         if args.once or args.loop:
