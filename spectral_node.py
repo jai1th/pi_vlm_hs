@@ -12,12 +12,14 @@ settings readback and the read / calibration sequences on top of it.
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
 import json
 import logging
 import math
 import statistics
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -36,6 +38,10 @@ class SpectralReading:
 
 class SpectralError(Exception):
     pass
+
+
+class ReadCancelled(Exception):
+    """The labels routed the frame without the background read."""
 
 
 def expected_settings(bulb_on):
@@ -209,6 +215,56 @@ class SpectralNode:
         self.log_path = log_path
         self._sleep = sleep
         self._clock = clock
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="spectral")
+        self._pending = None            # (substrate, Future) of the background read
+        self._cancel = threading.Event()
+
+    # --- Background read: started with the frame, used only if the labels need it ---
+
+    def start_read(self, request_id=None):
+        """Start the session substrate's read in the background as soon as the
+        frame is taken, so it runs while the VLM call is in flight. Whether the
+        reading is used is still decided by the labels: collect() hands it
+        over, cancel() stops it. Does nothing without a sensor or reference."""
+        self.wait()
+        if self.sensor is None or self.reference is None:
+            return
+        substrate = self.reference["substrate"]
+        self._pending = (substrate, self._executor.submit(
+            self.read_contamination, substrate, request_id=request_id))
+
+    def collect(self, substrate, request_id=None):
+        """The reading for `substrate`: the background read when it was taken
+        for this substrate, otherwise a read now (which, for a substrate other
+        than the reference's, returns without touching the sensor)."""
+        if self._pending is not None and self._pending[0] == substrate:
+            future = self._pending[1]
+            self._pending = None
+            return future.result()
+        self.cancel()
+        self.wait()
+        return self.read_contamination(substrate, request_id=request_id)
+
+    def cancel(self):
+        """Stop the background read before its next conversion. Does not block."""
+        if self._pending is not None:
+            self._cancel.set()
+
+    def wait(self):
+        """Block until no background read is running (bulb off). Never raises."""
+        if self._pending is not None:
+            concurrent.futures.wait([self._pending[1]])
+            self._pending = None
+        self._cancel.clear()
+
+    def close(self):
+        """Stop any background read, then release the sensor."""
+        self.cancel()
+        self.wait()
+        self._executor.shutdown()
+        if self.sensor is not None:
+            self.sensor.close()
 
     def read_contamination(self, substrate, *, budget_s=cfg.READ_BUDGET_S, request_id=None):
         """Contamination tri-state for `substrate`. Never raises.
@@ -232,6 +288,9 @@ class SpectralNode:
             acq = _new_acquisition()
             try:
                 self._acquire(acq, deadline, bulb_on=True, replicates=cfg.REPLICATES)
+            except ReadCancelled:
+                return self._finish(request_id, substrate, acq,
+                                    _no_reading("read_cancelled"), attempt=attempt)
             except Exception as exc:
                 self._log(request_id, substrate, acq, event="sensor_failure",
                           attempt=attempt, error=repr(exc))
@@ -269,6 +328,8 @@ class SpectralNode:
         """Take n conversions into `acq`; returns their (raw, calibrated) counts."""
         start = len(acq["calibrated"])
         for _ in range(n):
+            if self._cancel.is_set():
+                raise ReadCancelled()
             if deadline is not None and self._clock() >= deadline:
                 raise TimeoutError("read budget exceeded")
             raw, calibrated, temperatures = self.sensor.take_reading()

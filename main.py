@@ -70,13 +70,21 @@ def run_once(source, client, spectral, servo, as_json, save_dir=None, t0=None):
         t0 = time.monotonic()
     image = source.grab()
     request_id = "cap-{}".format(uuid.uuid4().hex[:12])
-    frame_path = save_frame(image, save_dir, request_id) if save_dir else None
-    result = client.detect_pil(image, request_id=request_id)
-    if as_json:
-        print_result(result, as_json=True)
-    act_on_result(result, spectral, servo, t0)
-    if frame_path:
-        save_result(result, frame_path)
+    # Started after grab() so the AS7265x bulb never lights the frame the VLM sees.
+    spectral.start_read(request_id)
+    try:
+        frame_path = save_frame(image, save_dir, request_id) if save_dir else None
+        result = client.detect_pil(image, request_id=request_id)
+        if as_json:
+            print_result(result, as_json=True)
+        act_on_result(result, spectral, servo, t0)
+        if frame_path:
+            save_result(result, frame_path)
+    finally:
+        # Bulb off and sensor idle before the next frame; a failed VLM call
+        # does not wait out the whole read.
+        spectral.cancel()
+        spectral.wait()
 
 
 def warn_no_reference(why):
@@ -201,8 +209,8 @@ def main():
     finally:
         source.close()
         client.close()
-        if spectral and spectral.sensor:
-            spectral.sensor.close()
+        if spectral:
+            spectral.close()
         if servo:
             servo.close()
 

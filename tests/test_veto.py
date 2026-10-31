@@ -11,6 +11,7 @@ import itertools
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -76,6 +77,23 @@ class FakeSensor:
             self.level *= 1 - self.sag_per_reading
         calibrated = {ch: (50000.0 if ch in EXCLUDED else level) for ch in ALL_CHANNELS}
         return dict(calibrated), calibrated, {}
+
+    def close(self):
+        self.calls.append("close")
+
+
+class BlockingSensor(FakeSensor):
+    """Holds every conversion until `release` is set, like a slow I2C bus."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def take_reading(self):
+        self.started.set()
+        self.release.wait(5)
+        return super().take_reading()
 
 
 class FakeServo:
@@ -281,6 +299,79 @@ class ClassRoutingTests(VetoTestCase):
     def test_route_refuses_to_guess_without_a_reading(self):
         with self.assertRaises(ValueError):
             route([{"label": "togo_box"}], None)
+
+
+class BackgroundReadTests(VetoTestCase):
+    """The read starts with the frame; the labels decide whether it is used."""
+
+    def last_spectral_log(self):
+        with open(os.path.join(self.tmp, "spectral.jsonl")) as f:
+            return json.loads(f.readlines()[-1])
+
+    def test_green_class_uses_the_background_read(self):
+        sensor = FakeSensor(level=5388)
+        node = self.node(sensor)
+        node.start_read("cap-test")
+        self.assertEqual(self.decide(["togo_box"], node=node)[:2],
+                         (GREEN, "class_recyclable_clean"))
+        self.assertEqual(sensor.calls.count("enable_white"), 1)
+        self.assertEqual(sensor.calls.count("take_reading"), cfg.REPLICATES)
+
+    def test_contaminated_background_read_vetoes(self):
+        node = self.node(FakeSensor(level=4380))
+        node.start_read("cap-test")
+        self.assertEqual(self.decide(["togo_box"], node=node)[:2], (CLEAR, "contamination_veto"))
+
+    def test_clear_class_routes_without_waiting_and_cancels(self):
+        sensor = BlockingSensor()
+        node = self.node(sensor)
+        node.start_read("cap-test")
+        self.assertTrue(sensor.started.wait(5))
+        self.assertEqual(self.decide(["straw"], node=node),
+                         (CLEAR, "class_landfill", [STREAM_ANGLE[CLEAR]]))
+        # Routed and swung while the first conversion was still held.
+        self.assertNotIn("take_reading", sensor.calls)
+        sensor.release.set()
+        node.wait()
+        self.assertEqual(sensor.calls.count("take_reading"), 1)
+        self.assertFalse(sensor.white_on)
+        self.assertEqual(self.last_spectral_log()["reason"], "read_cancelled")
+
+    def test_no_detection_cancels(self):
+        sensor = FakeSensor()
+        node = self.node(sensor)
+        node.start_read("cap-test")
+        self.assertEqual(self.decide([], node=node), (CLEAR, "no_detection", []))
+        node.wait()
+        self.assertFalse(sensor.white_on)
+
+    def test_other_substrate_ignores_the_background_read(self):
+        node = self.node(FakeSensor())
+        node.start_read("cap-test")
+        self.assertEqual(self.decide(["paper"], node=node)[:2], (CLEAR, "substrate_uncharacterized"))
+
+    def test_no_reference_starts_nothing(self):
+        sensor = FakeSensor()
+        self.node(sensor, ref=None).start_read("cap-test")
+        self.assertEqual(sensor.calls, [])
+
+    def test_calibration_after_a_cancel_is_not_cancelled(self):
+        node = self.node(FakeSensor())
+        node.cancel()   # nothing pending: must not leave the flag set
+        node.start_read("cap-test")
+        node.cancel()
+        node.wait()
+        acq = {"raw": [], "calibrated": [], "ic_temperature_c": []}
+        node._replicates(acq, cfg.REPLICATES)
+        self.assertEqual(len(acq["raw"]), cfg.REPLICATES)
+
+    def test_close_waits_then_releases_the_sensor(self):
+        sensor = FakeSensor()
+        node = self.node(sensor)
+        node.start_read("cap-test")
+        node.close()
+        self.assertEqual(sensor.calls[-1], "close")
+        self.assertFalse(sensor.white_on)
 
 
 class CheckSpectralTests(VetoTestCase):

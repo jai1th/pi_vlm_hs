@@ -103,8 +103,11 @@ def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_P
     it is the common case, and there is nothing to divert.
     Returns (stream, reason).
 
-    The spectral read happens only when the classes leave it undecided, so
-    CLEAR-routing classes never pay its latency. t0 is a time.monotonic() value
+    The spectral read starts with the frame (spectral.start_read in
+    main.run_once) and runs while the VLM call is in flight. The labels still
+    decide whether it is used: it is collected only when the classes leave the
+    frame undecided, and cancelled otherwise, so CLEAR-routing classes never
+    wait for it. t0 is a time.monotonic() value
     taken at the Enter press; the elapsed time to the decision (spectral read
     included) is printed before the servo moves, so actuation is not included.
     """
@@ -114,7 +117,9 @@ def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_P
 
     reading = None
     if class_route(objects) is None:
-        reading = spectral.read_contamination(substrate_of(objects), request_id=request_id)
+        reading = spectral.collect(substrate_of(objects), request_id=request_id)
+    else:
+        spectral.cancel()   # the labels decided: the background read is not needed
     stream, reason = route(objects, reading)
     angle = STREAM_ANGLE[stream]
     elapsed = None if t0 is None else time.monotonic() - t0
