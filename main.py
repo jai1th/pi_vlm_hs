@@ -9,6 +9,11 @@
   python3 main.py --calibrate                             # session spectral reference, then exit
   python3 main.py --source file --image test.jpg --no-spectral --dry-run
   python3 main.py --source orbbec --readings 2            # 2 spectral readings per item (default 3)
+  python3 main.py --source orbbec --no-record             # skip the per-detection MP4
+
+With the orbbec source every detection is recorded, from the detection frame
+until the servo is back home, to detection_recordings/<time>_<request_id>.mp4
+(--record-dir to change it). Needs ffmpeg; without it the run goes on unrecorded.
 
 Run --calibrate at the start of each session: without a usable
 session_reference.json every GREEN-class item routes CLEAR (no_session_reference).
@@ -16,7 +21,7 @@ session_reference.json every GREEN-class item routes CLEAR (no_session_reference
 Modules: capture.py (frames), vlm_pi_client.py (HTTP + preprocessing),
 actions.py (decision node: class + spectral gate -> stream), spectral_node.py (AS7265x
 gate), contamination_config.py (veto constants), servo.py (pigpio servo),
-results.py (JSON print), storage.py (--save-dir, JSONL logs).
+results.py (JSON print), storage.py (--save-dir, JSONL logs), recorder.py (MP4).
 """
 
 import argparse
@@ -27,6 +32,7 @@ import uuid
 from capture import CaptureError, make_source
 from actions import act_on_result
 from contamination_config import CONTAM_MODEL, MIN_REPLICATES, REPLICATES, SESSION_REFERENCE_PATH
+from recorder import RECORDINGS_DIR, Recorder, RecorderError
 from results import print_result
 from servo import DEFAULT_SPEED_DPS, SERVO_PIN, Servo, ServoError
 from spectral_node import (As7265xSensor, SpectralError, SpectralNode, calibrate_and_save,
@@ -74,14 +80,19 @@ def parse_args():
                         "unaffected".format(REPLICATES, MIN_REPLICATES))
     p.add_argument("--no-spectral", action="store_true",
                    help="Run without the AS7265x (same as a missing reference: GREEN classes route CLEAR)")
+    p.add_argument("--record-dir", default=RECORDINGS_DIR,
+                   help="Where each detection's MP4 goes (default: detection_recordings/ in the repo)")
+    p.add_argument("--no-record", action="store_true", help="Do not record detections")
     return p.parse_args()
 
 
-def run_once(source, client, spectral, servo, as_json, save_dir=None, t0=None):
+def run_once(source, client, spectral, servo, as_json, save_dir=None, t0=None, recorder=None):
     if t0 is None:
         t0 = time.monotonic()
     image = source.grab()
     request_id = "cap-{}".format(uuid.uuid4().hex[:12])
+    if recorder:
+        recorder.start(request_id)   # right after the detection frame
     # Started after grab() so the AS7265x bulb never lights the frame the VLM sees.
     spectral.start_read(request_id)
     try:
@@ -89,10 +100,12 @@ def run_once(source, client, spectral, servo, as_json, save_dir=None, t0=None):
         result = client.detect_pil(image, request_id=request_id)
         if as_json:
             print_result(result, as_json=True)
-        act_on_result(result, spectral, servo, t0)
+        act_on_result(result, spectral, servo, t0)   # returns once the servo is home
         if frame_path:
             save_result(result, frame_path)
     finally:
+        if recorder:
+            recorder.stop()
         # Bulb off and sensor idle before the next frame; a failed VLM call
         # does not wait out the whole read.
         spectral.cancel()
@@ -104,6 +117,18 @@ def warn_no_reference(why):
     print("WARNING: no usable spectral reference: {}".format(why), file=sys.stderr)
     print("         every GREEN-class item will route CLEAR (no_session_reference)", file=sys.stderr)
     print("=" * 72, file=sys.stderr)
+
+
+def open_recorder(source, record_dir):
+    """A Recorder, or None with a warning: a missing ffmpeg or a file source
+    never stops the run."""
+    try:
+        recorder = Recorder(source, record_dir)
+    except RecorderError as exc:
+        print("WARNING: not recording detections: {}".format(exc), file=sys.stderr)
+        return None
+    print("recording detections to {}".format(record_dir))
+    return recorder
 
 
 def open_spectral(no_spectral, reference_path, readings=REPLICATES):
@@ -180,17 +205,20 @@ def main():
         print("error: {}".format(exc), file=sys.stderr)
         return 2
 
-    spectral = None
+    spectral = recorder = None
     try:
         source.open()
         client.check_ready()
+        if not args.no_record:
+            recorder = open_recorder(source, args.record_dir)
         spectral = open_spectral(args.no_spectral, args.reference, args.readings)
         if servo:
             servo.open()
         if args.once or args.loop:
             while True:
                 try:
-                    run_once(source, client, spectral, servo, args.json, args.save_dir)
+                    run_once(source, client, spectral, servo, args.json, args.save_dir,
+                             recorder=recorder)
                 except (VLMClientError, CaptureError, ServoError) as exc:
                     print("error: {}".format(exc), file=sys.stderr)
                     if args.once:
@@ -210,7 +238,8 @@ def main():
             if line.strip().lower() in ("q", "quit", "exit"):
                 return 0
             try:
-                run_once(source, client, spectral, servo, args.json, args.save_dir, t0)
+                run_once(source, client, spectral, servo, args.json, args.save_dir, t0,
+                         recorder=recorder)
             except (VLMClientError, CaptureError, ServoError) as exc:
                 print("error: {}".format(exc), file=sys.stderr)
     except (VLMClientError, CaptureError, ServoError) as exc:
@@ -219,6 +248,8 @@ def main():
     except KeyboardInterrupt:
         return 0
     finally:
+        if recorder:
+            recorder.close()   # reads the camera, so before source.close()
         source.close()
         client.close()
         if spectral:

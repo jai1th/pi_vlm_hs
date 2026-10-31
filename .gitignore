@@ -2,6 +2,7 @@ __pycache__/
 /logs
 /Log
 /captures
+/detection_recordings
 /session_reference.json
 
 # Only scripts go in git: no captures, results or session data.

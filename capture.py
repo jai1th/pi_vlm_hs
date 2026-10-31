@@ -86,7 +86,6 @@ class OrbbecCapture:
     def grab(self):
         if self._pipeline is None:
             raise CaptureError("camera not open; call open() first")
-        ob = self._ob
         # The pipeline streams while we wait for Enter, so the first frames
         # returned can be stale. Skip a few and use the newest.
         for _ in range(self.skip_frames):
@@ -97,7 +96,26 @@ class OrbbecCapture:
         color = frames.get_color_frame()
         if color is None:
             raise CaptureError("frame set had no colour frame")
+        return self._to_image(color)
 
+    def next_jpeg(self, timeout_ms=200):
+        """The next colour frame as JPEG bytes, or None if none arrived in
+        timeout_ms. MJPG frames pass through undecoded; RGB/BGR frames are
+        encoded here, which is slower and may drop frames on the Pi."""
+        if self._pipeline is None:
+            raise CaptureError("camera not open; call open() first")
+        frames = self._pipeline.wait_for_frames(timeout_ms)
+        color = None if frames is None else frames.get_color_frame()
+        if color is None:
+            return None
+        if color.get_format() == self._ob.OBFormat.MJPG:
+            return bytes(color.get_data())
+        buf = io.BytesIO()
+        self._to_image(color).save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+
+    def _to_image(self, color):
+        ob = self._ob
         data = bytes(color.get_data())
         fmt = color.get_format()
         w, h = color.get_width(), color.get_height()
