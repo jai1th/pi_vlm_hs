@@ -7,11 +7,12 @@
 route() is pure and deterministic: the SpectralReading is passed in, the sensor
 is never called inside it, and every failure mode routes CLEAR.
 
-Direction follows servo_test.py (Left key = negative angle, Right = positive):
-  CLEAR bin = left  = -90 deg
-  GREEN bin = right = +90 deg
-The diverter rests at 0. Every routed frame swings to its bin, holds 1 s and
-returns to 0 (see servo.py); an empty frame does not move it.
+Direction follows servo_test.py (Left key = negative angle, Right = positive).
+The diverter rests at HOME_DEG (servo.py) and each bin is an offset from it:
+  CLEAR bin = left  = HOME_DEG - 60 deg
+  GREEN bin = right = HOME_DEG + 60 deg
+Every routed frame swings to its bin, holds 1 s and returns home (see
+servo.py); an empty frame does not move it.
 
 The model outputs 9 classes. togo_cup spans both bins in the original routing
 split (Paper cup, Foam cup -> CLEAR; Disposable plastic cup -> GREEN) and
@@ -21,15 +22,17 @@ follows the majority -> CLEAR.
 import time
 
 from contamination_config import DECISION_LOG_PATH, GATE_NOT_IMPLEMENTED, SUBSTRATE_OF
+from servo import HOME_DEG
 from storage import append_jsonl, utc_timestamp
 
 GREEN = "green"
 CLEAR = "clear"
 
-STREAM_ANGLE = {
-    CLEAR: -90,   # left
-    GREEN: +90,   # right
+STREAM_OFFSET = {
+    CLEAR: -60,   # left
+    GREEN: +60,   # right
 }
+STREAM_ANGLE = {stream: HOME_DEG + offset for stream, offset in STREAM_OFFSET.items()}
 
 # togo_box is GREEN for the POC on the assumption of CARTON stock. The class also spans
 # EPS foam and PET, which have different clean baselines; a foam box would be given the

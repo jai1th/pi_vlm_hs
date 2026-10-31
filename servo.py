@@ -9,9 +9,10 @@ import math
 import time
 
 SERVO_PIN = 23
-CENTER_US = 1500                # pulse for 0 degrees (home)
+CENTER_US = 1500                # pulse for 0 degrees
 US_PER_DEG = 400 / 45           # Hitec: ~400 us per 45 deg
 MIN_DEG, MAX_DEG = -90, 90
+HOME_DEG = 20                   # diverter rest angle; stream angles are offsets from it
 
 DEFAULT_SPEED_DPS = 90.0        # "medium": a full 90 deg sweep takes ~1 s
 HOLD_S = 1.0                    # time spent at the target before returning to rest
@@ -28,7 +29,7 @@ def deg_to_us(deg):
 
 class Servo:
     def __init__(self, pin=SERVO_PIN, speed_dps=DEFAULT_SPEED_DPS, hold_s=HOLD_S,
-                 rest_deg=0.0, host="::1", port=8888, pi=None):
+                 rest_deg=HOME_DEG, host="::1", port=8888, pi=None):
         if speed_dps <= 0:
             raise ValueError("servo speed must be > 0 deg/s")
         self.pin = pin

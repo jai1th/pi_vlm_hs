@@ -16,7 +16,7 @@ from unittest import mock
 
 import contamination_config as cfg
 from actions import CLEAR, GREEN, ROUTING, STREAM_ANGLE, act_on_result, route
-from servo import Servo, deg_to_us
+from servo import HOME_DEG, Servo, deg_to_us
 from spectral_node import (SpectralError, SpectralNode, calibrate_and_save, expected_settings,
                            load_reference)
 from storage import UTC_FORMAT
@@ -379,11 +379,12 @@ class DiverterTests(unittest.TestCase):
         return servo, pi
 
     def test_directions(self):
-        self.assertEqual(STREAM_ANGLE, {CLEAR: -90, GREEN: +90})
+        self.assertEqual(HOME_DEG, 20)
+        self.assertEqual(STREAM_ANGLE, {CLEAR: HOME_DEG - 60, GREEN: HOME_DEG + 60})
 
-    def test_rests_at_zero_on_open(self):
+    def test_rests_at_home_on_open(self):
         _, pi = self.servo()
-        self.assertEqual(pi.pulses, [deg_to_us(0)])
+        self.assertEqual(pi.pulses, [deg_to_us(HOME_DEG)])
 
     def test_both_streams_swing_and_return_home(self):
         for stream in (CLEAR, GREEN):
@@ -391,7 +392,7 @@ class DiverterTests(unittest.TestCase):
                 servo, pi = self.servo()
                 servo.swing(STREAM_ANGLE[stream])
                 self.assertIn(deg_to_us(STREAM_ANGLE[stream]), pi.pulses)
-                self.assertEqual(pi.pulses[-1], deg_to_us(0))
+                self.assertEqual(pi.pulses[-1], deg_to_us(HOME_DEG))
 
 
 class SessionReferenceTests(VetoTestCase):
