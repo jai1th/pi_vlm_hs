@@ -18,8 +18,8 @@ from unittest import mock
 import contamination_config as cfg
 from actions import CLEAR, GREEN, ROUTING, STREAM_ANGLE, act_on_result, route
 from servo import HOME_DEG, Servo, deg_to_us
-from spectral_node import (SpectralError, SpectralNode, calibrate_and_save, expected_settings,
-                           load_reference)
+from spectral_node import (SpectralError, SpectralNode, _new_acquisition, calibrate_and_save,
+                           expected_settings, load_reference)
 from storage import UTC_FORMAT
 
 ALL_CHANNELS = "ABCDEFGHIJKLRSTUVW"
@@ -76,7 +76,7 @@ class FakeSensor:
             level = self.level
             self.level *= 1 - self.sag_per_reading
         calibrated = {ch: (50000.0 if ch in EXCLUDED else level) for ch in ALL_CHANNELS}
-        return dict(calibrated), calibrated, {}
+        return dict(calibrated), calibrated, {}, {"conversion_s": 0.4, "readout_s": 0.1}
 
     def close(self):
         self.calls.append("close")
@@ -133,16 +133,19 @@ class VetoTestCase(unittest.TestCase):
             sleep=lambda s: None, clock=clock or itertools.count().__next__)
 
     def decide(self, labels, sensor=None, node=None):
-        """Run one frame through act_on_result; return (stream, reason, servo angles)."""
+        """Run one frame through act_on_result; return (stream, reason, servo angles).
+        The printed output is left in self.output."""
         sensor = sensor or FakeSensor()
         node = node or self.node(sensor)
         servo = FakeServo()
-        result = {"request_id": "cap-test", "objects": [
+        result = {"request_id": "cap-test", "client_elapsed_ms": 1230.0, "objects": [
             {"label": label, "bbox_canvas": [0, 0, 10, 10], "bbox_source_px": [0, 0, 10, 10]}
             for label in labels]}
-        with contextlib.redirect_stdout(io.StringIO()):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
             stream, reason = act_on_result(result, node, servo,
                                            log_path=os.path.join(self.tmp, "decisions.jsonl"))
+        self.output = out.getvalue()
         return stream, reason, servo.angles
 
 
@@ -217,6 +220,22 @@ class SpectralGateTests(VetoTestCase):
         self.assertEqual(self.decide(["togo_box"], sensor)[:2],
                          (CLEAR, "instrument_config_mismatch"))
         self.assertNotIn("take_reading", sensor.calls)
+
+    def test_timing_printed_and_logged(self):
+        self.decide(["togo_box"], FakeSensor(level=5388))
+        self.assertIn("vlm 1.23 s | sensor: conversion 1.20 s, readout 0.30 s over 3 reading(s)",
+                      self.output)
+        with open(os.path.join(self.tmp, "decisions.jsonl")) as f:
+            record = json.loads(f.readline())
+        self.assertEqual(record["vlm_s"], 1.23)
+        self.assertEqual(record["spectral"]["timing"]["readings"], cfg.REPLICATES)
+        with open(os.path.join(self.tmp, "spectral.jsonl")) as f:
+            self.assertEqual(json.loads(f.readline())["conversion_s"], [0.4] * cfg.REPLICATES)
+
+        self.decide(["straw"])
+        self.assertIn("vlm 1.23 s | sensor not used", self.output)
+        self.decide(["togo_box"], node=self.node(FakeSensor(), ref=None))
+        self.assertIn("sensor: no readings (no_session_reference)", self.output)
 
     def test_no_session_reference_does_not_touch_sensor(self):
         sensor = FakeSensor()
@@ -361,7 +380,7 @@ class BackgroundReadTests(VetoTestCase):
         node.start_read("cap-test")
         node.cancel()
         node.wait()
-        acq = {"raw": [], "calibrated": [], "ic_temperature_c": []}
+        acq = _new_acquisition()
         node._replicates(acq, cfg.REPLICATES)
         self.assertEqual(len(acq["raw"]), cfg.REPLICATES)
 

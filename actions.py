@@ -97,6 +97,21 @@ def route(objects, reading=None):
     return GREEN, "class_recyclable_clean"
 
 
+def format_timing(vlm_ms, reading):
+    """VLM round trip and, when the spectral reading was used, its conversion
+    and readout time summed over the readings."""
+    vlm = "n/a" if vlm_ms is None else "{:.2f} s".format(vlm_ms / 1000)
+    if reading is None:
+        sensor = "sensor not used"
+    elif reading.timing is None:
+        sensor = "sensor: no readings ({})".format(reading.reason)
+    else:
+        t = reading.timing
+        sensor = "sensor: conversion {:.2f} s, readout {:.2f} s over {} reading(s)".format(
+            t["conversion_s"], t["readout_s"], t["readings"])
+    return "    vlm {} | {}".format(vlm, sensor)
+
+
 def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_PATH):
     """Route one frame, log the decision and move the servo; servo=None only
     prints (dry run). An empty frame is logged but never actuates: in --loop
@@ -123,6 +138,7 @@ def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_P
     stream, reason = route(objects, reading)
     angle = STREAM_ANGLE[stream]
     elapsed = None if t0 is None else time.monotonic() - t0
+    vlm_ms = result.get("client_elapsed_ms")
 
     append_jsonl(log_path, {
         "timestamp": utc_timestamp(),
@@ -134,7 +150,8 @@ def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_P
         "reason": reason,
         "spectral": None if reading is None else {
             "state": reading.state, "d": reading.d, "level": reading.level,
-            "reason": reading.reason},
+            "reason": reading.reason, "timing": reading.timing},
+        "vlm_s": None if vlm_ms is None else vlm_ms / 1000,
         "reference_timestamp": (spectral.reference or {}).get("timestamp"),
         "decision_s": elapsed,
     })
@@ -142,12 +159,14 @@ def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_P
     took = "" if elapsed is None else " [decision in {:.2f} s]".format(elapsed)
     if not objects:
         print("[{}] no objects detected: no action{}".format(request_id, took))
+        print(format_timing(vlm_ms, reading))
         return stream, reason
 
     gate = "" if reading is None or reading.d is None else " d={:+.3f}".format(reading.d)
     print("[{}] {} detection(s): {} -> {} {:+d} deg ({}){}{}, hold 1 s, home".format(
         request_id, len(objects), ", ".join(labels),
         stream.upper(), angle, reason, gate, took))
+    print(format_timing(vlm_ms, reading))
     if servo is not None:
         servo.swing(angle)
     return stream, reason

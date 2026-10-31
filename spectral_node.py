@@ -21,7 +21,7 @@ import statistics
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import contamination_config as cfg
 from storage import UTC_FORMAT, append_jsonl, utc_timestamp
@@ -34,6 +34,7 @@ class SpectralReading:
     level: float | None       # mean cal over the 13 retained channels
     reason: str               # always populated
     raw: dict | None          # all 18 raw channel counts (one list entry per replicate)
+    timing: dict | None = None  # conversion_s / readout_s summed over `readings` conversions
 
 
 class SpectralError(Exception):
@@ -106,9 +107,15 @@ class As7265xSensor:
         self._real.disable_all_bulbs()
 
     def take_reading(self):
-        """One conversion -> (raw, calibrated, ic_temperature_c), keyed by channel letter."""
-        _, raw, calibrated, temperatures = self._real.take_reading()
-        return raw, calibrated, temperatures
+        """One conversion -> (raw, calibrated, ic_temperature_c, timing), keyed by
+        channel letter. timing splits the call into conversion (trigger + DATA_RDY
+        poll, as RealSensor measures it) and readout (the register reads after it)."""
+        t0 = time.monotonic()
+        wait_ms, raw, calibrated, temperatures = self._real.take_reading()
+        conversion_s = wait_ms / 1000.0
+        timing = {"conversion_s": conversion_s,
+                  "readout_s": time.monotonic() - t0 - conversion_s}
+        return raw, calibrated, temperatures, timing
 
     def read_settings(self):
         """Read gain, integration cycles and bulb state back from the device.
@@ -196,7 +203,17 @@ def _no_reading(reason):
 
 
 def _new_acquisition():
-    return {"settings": None, "raw": [], "calibrated": [], "ic_temperature_c": []}
+    return {"settings": None, "raw": [], "calibrated": [], "ic_temperature_c": [],
+            "conversion_s": [], "readout_s": []}
+
+
+def _timing(acq):
+    """Conversion and readout seconds summed over the conversions in `acq`."""
+    if not acq or not acq["conversion_s"]:
+        return None
+    return {"readings": len(acq["conversion_s"]),
+            "conversion_s": sum(acq["conversion_s"]),
+            "readout_s": sum(acq["readout_s"])}
 
 
 # --- Node ------------------------------------------------------------------------------------
@@ -332,10 +349,12 @@ class SpectralNode:
                 raise ReadCancelled()
             if deadline is not None and self._clock() >= deadline:
                 raise TimeoutError("read budget exceeded")
-            raw, calibrated, temperatures = self.sensor.take_reading()
+            raw, calibrated, temperatures, timing = self.sensor.take_reading()
             acq["raw"].append(raw)
             acq["calibrated"].append(calibrated)
             acq["ic_temperature_c"].append(temperatures)
+            acq["conversion_s"].append(timing["conversion_s"])
+            acq["readout_s"].append(timing["readout_s"])
         return acq["raw"][start:], acq["calibrated"][start:]
 
     def check_bulb_readback(self, prompt=input):
@@ -515,6 +534,7 @@ class SpectralNode:
         return acq
 
     def _finish(self, request_id, substrate, acq, reading, attempt=None):
+        reading = replace(reading, timing=_timing(acq))
         self._log(request_id, substrate, acq or _new_acquisition(), event="read",
                   attempt=attempt, state=reading.state, d=reading.d, level=reading.level,
                   reason=reading.reason)
