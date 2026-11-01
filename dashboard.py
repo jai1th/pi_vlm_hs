@@ -38,6 +38,7 @@ LIVE_REFRESH_S = 0.2
 LIVE_STALE_S = 3.0
 LIVE_PREVIEW_WIDTH = 960      # px; frames are inlined in every update, so keep them small
 LIVE_PREVIEW_QUALITY = 75
+LIVE_MAX_HEIGHT_VH = 75       # the frame never makes the Live tab scroll
 
 STATE_LABEL = {True: "⛔ contaminated", False: "✅ clean", None: "⚠️ undetermined"}
 
@@ -371,19 +372,31 @@ def live_frame_html(jpeg):
     short-lived /media URL that the next refresh deletes; over a slow path
     (tailscale serve, a relay) the browser asks for it too late and gets a
     404. Inlined, the frame arrives with the page update itself. Downscaled
-    first to keep each update small."""
+    first to keep each update small.
+
+    The frame sits in a box sized from numbers alone (width capped by the
+    window, height from the aspect ratio), never from the image: an image's
+    box is empty until it decodes, and that instant of a shorter page makes
+    the browser clamp the scroll position to the top on every refresh. The
+    cap keeps the whole frame on screen, so the Live tab needs no scrolling."""
+    width, height = 16, 9
     try:
         with Image.open(io.BytesIO(jpeg)) as img:
+            width, height = img.size
             if img.width > LIVE_PREVIEW_WIDTH:
-                img = img.convert("RGB").resize(
-                    (LIVE_PREVIEW_WIDTH, round(img.height * LIVE_PREVIEW_WIDTH / img.width)))
+                width, height = LIVE_PREVIEW_WIDTH, round(img.height * LIVE_PREVIEW_WIDTH / img.width)
                 buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=LIVE_PREVIEW_QUALITY)
+                img.convert("RGB").resize((width, height)).save(
+                    buf, format="JPEG", quality=LIVE_PREVIEW_QUALITY)
                 jpeg = buf.getvalue()
     except OSError:
         pass   # caught mid-replace or corrupt: send as is, the next refresh replaces it
-    return '<img src="data:image/jpeg;base64,{}" style="width:100%;border-radius:4px" alt="live camera frame">'.format(
-        base64.b64encode(jpeg).decode("ascii"))
+    return ('<div style="position:relative;margin:0 auto;aspect-ratio:{w}/{h};'
+            'width:min(100%,calc({vh}vh*{w}/{h}))">'
+            '<img src="data:image/jpeg;base64,{b64}" width="{w}" height="{h}" alt="live camera frame" '
+            'style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;border-radius:4px">'
+            '</div>').format(
+        b64=base64.b64encode(jpeg).decode("ascii"), w=width, h=height, vh=LIVE_MAX_HEIGHT_VH)
 
 
 def main():

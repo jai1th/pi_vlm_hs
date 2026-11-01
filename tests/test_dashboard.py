@@ -295,6 +295,7 @@ class DashboardRenderTests(unittest.TestCase):
         self.assertEqual(list(app.exception), [])
         html = app.get("html")[0].proto.body
         self.assertIn('src="data:image/jpeg;base64,', html)
+        self.assertIn('width="960" height="540"', html)   # box reserved before decode
         b64 = html.split("base64,", 1)[1].split('"', 1)[0]
         with Image.open(io.BytesIO(base64.b64decode(b64))) as img:
             self.assertEqual(img.size, (960, 540))
