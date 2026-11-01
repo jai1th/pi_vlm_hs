@@ -25,6 +25,7 @@ results.py (JSON print), storage.py (--save-dir, JSONL logs), recorder.py (MP4).
 """
 
 import argparse
+import signal
 import sys
 import time
 import uuid
@@ -187,8 +188,18 @@ def check_spectral():
     return 0 if ok else 1
 
 
+def exit_on_sigterm():
+    """kill / systemctl stop send SIGTERM, which by default ends Python without
+    running any finally block: the bulb could stay lit, the servo powered and
+    the live-preview frame left behind. Treat it like Ctrl+C instead."""
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, handler)
+
+
 def main():
     args = parse_args()
+    exit_on_sigterm()
     if args.list_devices:
         from capture import list_devices
         list_devices()

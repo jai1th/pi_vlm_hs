@@ -11,12 +11,15 @@ main.py writes while its Orbbec source is open; the camera itself can only be
 opened by one process.
 """
 
+import base64
+import io
 import os
 import time
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+from PIL import Image
 
 import contamination_config as cfg
 import dashboard_data as data
@@ -33,6 +36,8 @@ ITEM, CLEAN = "this item", "clean reference"
 
 LIVE_REFRESH_S = 0.2
 LIVE_STALE_S = 3.0
+LIVE_PREVIEW_WIDTH = 960      # px; frames are inlined in every update, so keep them small
+LIVE_PREVIEW_QUALITY = 75
 
 STATE_LABEL = {True: "⛔ contaminated", False: "✅ clean", None: "⚠️ undetermined"}
 
@@ -357,7 +362,28 @@ def live_view():
     age = time.time() - modified
     if age > LIVE_STALE_S:
         st.warning("The last frame is {:.0f} s old: is main.py still running?".format(age))
-    st.image(jpeg, caption="frame age {:.2f} s".format(age), width="stretch")
+    st.html(live_frame_html(jpeg))
+    st.caption("frame age {:.2f} s".format(age))
+
+
+def live_frame_html(jpeg):
+    """The frame inlined as a data URI. st.image serves each frame from a
+    short-lived /media URL that the next refresh deletes; over a slow path
+    (tailscale serve, a relay) the browser asks for it too late and gets a
+    404. Inlined, the frame arrives with the page update itself. Downscaled
+    first to keep each update small."""
+    try:
+        with Image.open(io.BytesIO(jpeg)) as img:
+            if img.width > LIVE_PREVIEW_WIDTH:
+                img = img.convert("RGB").resize(
+                    (LIVE_PREVIEW_WIDTH, round(img.height * LIVE_PREVIEW_WIDTH / img.width)))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=LIVE_PREVIEW_QUALITY)
+                jpeg = buf.getvalue()
+    except OSError:
+        pass   # caught mid-replace or corrupt: send as is, the next refresh replaces it
+    return '<img src="data:image/jpeg;base64,{}" style="width:100%;border-radius:4px" alt="live camera frame">'.format(
+        base64.b64encode(jpeg).decode("ascii"))
 
 
 def main():

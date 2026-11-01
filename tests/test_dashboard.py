@@ -3,6 +3,7 @@
     python3 -m unittest discover -s tests -t . -v
 """
 
+import base64
 import contextlib
 import io
 import json
@@ -221,6 +222,35 @@ class FrameThreadTests(unittest.TestCase):
             cam.close()
         self.assertFalse(os.path.exists(self.live))
 
+    def test_no_live_frame_or_tmp_survives(self):
+        for path in (self.live, self.live + ".tmp"):
+            open(path, "wb").close()   # leftovers of a killed run
+        cam = OrbbecCapture(None, live_path=self.live)
+        cam._clear_live()               # what open() does before streaming
+        self.assertEqual(os.listdir(self._tmp.name), [])
+        cam = self.camera(FakePipeline())
+        time.sleep(0.05)
+        open(self.live + ".tmp", "wb").close()
+        cam.close()
+        self.assertEqual(os.listdir(self._tmp.name), [])
+
+    def test_sigterm_runs_the_cleanup(self):
+        import main
+        import signal
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            main.exit_on_sigterm()
+            cleaned = []
+            with self.assertRaises(KeyboardInterrupt):
+                try:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(1)
+                finally:
+                    cleaned.append(True)
+            self.assertEqual(cleaned, [True])
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
     def test_stream_failure_is_a_capture_error(self):
         cam = self.camera(FakePipeline(fail_after=2))
         try:
@@ -254,6 +284,20 @@ class DashboardRenderTests(unittest.TestCase):
         self.assertEqual(list(app.exception), [])
         self.assertIn("cap-straw", app.subheader[0].value)   # newest shown by default
         self.assertIn("Within its age limit", app.success[0].value)
+
+    def test_live_frame_is_inlined_and_downscaled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live = os.path.join(tmp, "live.jpg")
+            Image.new("RGB", (1280, 720), (10, 120, 200)).save(live, format="JPEG")
+            with mock.patch("capture.LIVE_FRAME_PATH", live):
+                app = self.render(tmp)
+                app.toggle(key="live").set_value(True).run()
+        self.assertEqual(list(app.exception), [])
+        html = app.get("html")[0].proto.body
+        self.assertIn('src="data:image/jpeg;base64,', html)
+        b64 = html.split("base64,", 1)[1].split('"', 1)[0]
+        with Image.open(io.BytesIO(base64.b64decode(b64))) as img:
+            self.assertEqual(img.size, (960, 540))
 
     def test_renders_an_empty_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

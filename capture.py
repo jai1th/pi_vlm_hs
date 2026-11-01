@@ -103,6 +103,7 @@ class OrbbecCapture:
                 "Could not start Orbbec camera at {}:{}: {}".format(self.ip, self.port, exc)
             ) from exc
         self._pipeline = pipeline
+        self._clear_live()   # leftovers of a run that was killed
         self._start_pump()
 
     def _start_pump(self):
@@ -212,9 +213,16 @@ class OrbbecCapture:
                 self._pipeline.stop()
             finally:
                 self._pipeline = None
-        if self.live_path:
+        self._clear_live()   # the dashboard then reports no live feed
+
+    def _clear_live(self):
+        """Delete the live-preview frame and any half-written .tmp: no frame
+        outlives the run that wrote it."""
+        if not self.live_path:
+            return
+        for path in (self.live_path, self.live_path + ".tmp"):
             try:
-                os.remove(self.live_path)   # the dashboard then reports no live feed
+                os.remove(path)
             except OSError:
                 pass
 
