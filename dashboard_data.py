@@ -12,6 +12,7 @@ import os
 import statistics
 
 import contamination_config as cfg
+import routing
 from spectral_node import level_of, max_cv
 from storage import UTC_FORMAT
 
@@ -29,6 +30,7 @@ def paths(run_dir):
         "spectral": os.path.join(run_dir, cfg.SPECTRAL_LOG_PATH),
         "reference": os.path.join(run_dir, cfg.SESSION_REFERENCE_PATH),
         "recordings": os.path.join(run_dir, "detection_recordings"),
+        "routing": os.path.join(run_dir, routing.ROUTING_PATH),
     }
 
 
@@ -101,6 +103,15 @@ def detections(decision_records, spectral_records, recordings_by_id):
                         recording=recordings_by_id.get(rid)))
     out.reverse()
     return out
+
+
+def running_routing(decision_records):
+    """(digest, timestamp) of the mapping main.py used for its latest logged
+    decision, or (None, None) when no decision has one yet."""
+    for r in reversed(decision_records):
+        if r.get("routing_digest"):
+            return r["routing_digest"], r.get("timestamp")
+    return None, None
 
 
 def final_read(spectral_log):

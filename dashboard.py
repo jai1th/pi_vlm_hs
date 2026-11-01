@@ -23,6 +23,8 @@ from PIL import Image
 
 import contamination_config as cfg
 import dashboard_data as data
+import routing
+from actions import STREAM_ANGLE as ANGLES
 from capture import LIVE_FRAME_PATH
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -399,21 +401,140 @@ def live_frame_html(jpeg):
         b64=base64.b64encode(jpeg).decode("ascii"), w=width, h=height, vh=LIVE_MAX_HEIGHT_VH)
 
 
+# --- Routing ------------------------------------------------------------------------------
+
+def _routing_bump():
+    # A new key rebuilds the editor from the draft, so "what actually happens"
+    # follows each edit.
+    st.session_state.routing_editor_v = st.session_state.get("routing_editor_v", 0) + 1
+
+
+def _routing_edit(key):
+    draft = st.session_state.routing_draft
+    for row, changed in st.session_state[key].get("edited_rows", {}).items():
+        label = routing.LABELS[int(row)]
+        if changed.get("bag"):
+            draft = draft.with_edit(label, bag=changed["bag"].lower())
+        if "skip check" in changed:
+            draft = draft.with_edit(label, unchecked=bool(changed["skip check"]))
+    st.session_state.routing_draft = draft
+    _routing_bump()
+
+
+def _routing_set(to):
+    st.session_state.routing_draft = to
+    _routing_bump()
+
+
+def _routing_save(path):
+    saved = routing.save(st.session_state.routing_draft, path)
+    st.session_state.routing_draft = st.session_state.routing_base = saved
+    st.session_state.routing_flash = "Saved {}. Restart main.py to route with it.".format(path)
+    _routing_bump()
+
+
+def routing_tab(p):
+    state = st.session_state
+    saved, problem = routing.load(p["routing"])
+    if problem:
+        st.error("{}. main.py falls back to the built-in mapping; saving here replaces the "
+                 "file.".format(problem))
+
+    # The draft follows the file until it is edited; edits survive reruns.
+    if "routing_draft" not in state or not routing.changes(state.routing_base, state.routing_draft):
+        if state.get("routing_base") is None or state.routing_base.digest != saved.digest \
+                or "routing_draft" not in state:
+            state.routing_draft = saved
+            _routing_bump()
+        state.routing_base = saved
+    elif state.routing_base.digest != saved.digest:
+        st.info("routing.json changed on disk while you were editing; Save overwrites it.")
+    draft = state.routing_draft
+
+    running, when = data.running_routing(load_jsonl(p["decisions"]))
+    if running is None:
+        st.caption("main.py has not logged a decision with mapping info yet, so which mapping "
+                   "it runs is unknown. It reads the mapping when it starts.")
+    elif running == saved.digest:
+        st.success("main.py is routing with the saved mapping (as of its last detection, "
+                   "{}).".format(data.local_time(when)))
+    else:
+        st.warning("main.py's last detection ({}) used a different mapping from the saved one. "
+                   "Restart main.py to route with the saved mapping.".format(data.local_time(when)))
+    if state.get("routing_flash"):
+        st.success(state.pop("routing_flash"))
+
+    st.caption("GREEN bag: {:+d}°, right. CLEAR bag: {:+d}°, left. A GREEN item still needs a "
+               "clean spectral reading unless its contamination check is skipped.".format(
+                   ANGLES[routing.GREEN], ANGLES[routing.CLEAR]))
+    key = "routing_editor_{}".format(state.get("routing_editor_v", 0))
+    st.data_editor(
+        pd.DataFrame([{
+            "item": label,
+            "bag": draft.streams[label].upper(),
+            "skip check": label in draft.unchecked,
+            "what actually happens": routing.outcome(draft, label),
+        } for label in routing.LABELS]),
+        key=key, on_change=_routing_edit, args=(key,), hide_index=True, num_rows="fixed",
+        disabled=["item", "what actually happens"], width="stretch",
+        column_config={
+            "bag": st.column_config.SelectboxColumn("bag", options=["GREEN", "CLEAR"], required=True),
+            "skip check": st.column_config.CheckboxColumn(
+                "skip contamination check",
+                help="GREEN items only: send to GREEN on the camera label alone, with no spectral "
+                     "or other check. A dirty or full item can then reach the GREEN bag."),
+            "what actually happens": st.column_config.TextColumn(width="large"),
+        })
+
+    if draft.unchecked:
+        st.warning("⚠️ No contamination check for: {}. These go to the GREEN bag on the camera "
+                   "label alone.".format(", ".join(sorted(draft.unchecked))))
+    pending = routing.changes(saved, draft)
+    new_bypass = sorted(draft.unchecked - saved.unchecked)
+    confirmed = True
+    if pending:
+        st.markdown("**Unsaved changes**\n" + "\n".join("- " + c for c in pending))
+        if new_bypass:
+            confirmed = st.checkbox(
+                "I understand that {} will reach the GREEN bag without any contamination "
+                "check.".format(", ".join(new_bypass)), key="routing_confirm_" + draft.digest)
+    else:
+        st.caption("No unsaved changes.")
+
+    cols = st.columns(3)
+    cols[0].button("Save", type="primary", key="routing_save", width="stretch",
+                   disabled=not pending or not confirmed, on_click=_routing_save, args=(p["routing"],))
+    cols[1].button("Discard changes", key="routing_discard", width="stretch",
+                   disabled=not pending, on_click=_routing_set, args=(saved,))
+    cols[2].button("Reset to defaults", key="routing_reset", width="stretch",
+                   disabled=draft.digest == routing.DEFAULT_ROUTING.digest,
+                   on_click=_routing_set, args=(routing.DEFAULT_ROUTING,))
+    st.caption("Saved to {} ({}). main.py reads it once, at startup.".format(
+        p["routing"], "built-in mapping, no file yet" if saved.updated is None
+        else "saved " + data.local_time(saved.updated)))
+
+
 def main():
     st.set_page_config(page_title="WasteSep", layout="wide")
     run_dir = st.sidebar.text_input("main.py directory", os.environ.get("WASTESEP_RUN_DIR", HERE))
     p = data.paths(run_dir)
     st.sidebar.button("Refresh", width="stretch")
-    with st.sidebar.expander("Files", expanded=not all(os.path.exists(x) for x in p.values())):
+    optional = {"routing": "built-in mapping"}
+    with st.sidebar.expander("Files", expanded=not all(
+            os.path.exists(x) for name, x in p.items() if name not in optional)):
         for name, path in p.items():
-            st.caption("{} {}: `{}`".format("✓" if os.path.exists(path) else "✗ missing", name, path))
+            status = "✓" if os.path.exists(path) else (
+                "– none ({})".format(optional[name]) if name in optional else "✗ missing")
+            st.caption("{} {}: `{}`".format(status, name, path))
 
     st.title("WasteSep")
-    detections, reference, live = st.tabs(["Detections", "Reference", "Live"])
+    detections, reference, routing_, live = st.tabs(["Detections", "Reference", "Routing", "Live"])
     with detections:
         detections_tab(p)
     with reference:
         reference_tab(p)
+    with routing_:
+        routing_tab(p)
     with live:
         live_tab()
 

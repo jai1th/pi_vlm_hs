@@ -14,19 +14,16 @@ The diverter rests at HOME_DEG (servo.py) and each bin is an offset from it:
 Every routed frame swings to its bin, holds 1 s and returns home (see
 servo.py); an empty frame does not move it.
 
-The model outputs 9 classes. togo_cup spans both bins in the original routing
-split (Paper cup, Foam cup -> CLEAR; Disposable plastic cup -> GREEN) and
-follows the majority -> CLEAR.
+Which item goes to which bag comes from routing.py (routing.json, edited in
+the dashboard); main.py loads it once and passes it in.
 """
 
 import time
 
 from contamination_config import DECISION_LOG_PATH, GATE_NOT_IMPLEMENTED, SUBSTRATE_OF
+from routing import CLEAR, DEFAULT_ROUTING, GREEN
 from servo import HOME_DEG
 from storage import append_jsonl, utc_timestamp
-
-GREEN = "green"
-CLEAR = "clear"
 
 STREAM_OFFSET = {
     CLEAR: -60,   # left
@@ -34,36 +31,28 @@ STREAM_OFFSET = {
 }
 STREAM_ANGLE = {stream: HOME_DEG + offset for stream, offset in STREAM_OFFSET.items()}
 
-# togo_box is GREEN for the POC on the assumption of CARTON stock. The class also spans
-# EPS foam and PET, which have different clean baselines; a foam box would be given the
-# carton reference and produce a meaningless d. Showcase with carton boxes only.
-ROUTING = {
-    "togo_box":       GREEN,
-    "plastic_bottle": GREEN,
-    "paper":          GREEN,
-    "togo_cup":       CLEAR,
-    "cup_lid":        CLEAR,
-    "straw":          CLEAR,
-    "tissue":         CLEAR,
-    "wrapper":        CLEAR,
-    "glass_bottle":   CLEAR,
-}
+ROUTING = DEFAULT_ROUTING.streams   # the built-in mapping (routing.py)
 
 
-def class_route(objects):
+def class_route(objects, routing=DEFAULT_ROUTING):
     """The class-only part of route(). Returns (stream, reason) when the labels
     alone decide, or None when the frame needs the spectral gate.
 
     There is one physical object per frame, but the VLM may draw several boxes
-    with conflicting labels for it; the most conservative label wins.
+    with conflicting labels for it; the most conservative label wins. Labels
+    the routing marks unchecked go GREEN with no gate, but only when every
+    label in the frame is one: a frame that also has a checked label keeps
+    the gate.
     """
-    streams = {ROUTING.get(o["label"]) for o in objects}
+    streams = {routing.streams.get(o["label"]) for o in objects}
     if not streams:
         return CLEAR, "no_detection"
     if None in streams:
         return CLEAR, "unknown_label"
     if CLEAR in streams:
         return CLEAR, "class_landfill"   # also covers a GREEN/CLEAR label conflict
+    if all(o["label"] in routing.unchecked for o in objects):
+        return GREEN, "class_recyclable_unchecked"
     if any(o["label"] in GATE_NOT_IMPLEMENTED for o in objects):
         return CLEAR, "gate_not_implemented"
     return None
@@ -76,7 +65,7 @@ def substrate_of(objects):
     return substrates.pop() if len(substrates) == 1 else None
 
 
-def route(objects, reading=None):
+def route(objects, reading=None, routing=DEFAULT_ROUTING):
     """(stream, reason) for one frame. `reading` is required exactly when
     class_route() returns None.
 
@@ -85,7 +74,7 @@ def route(objects, reading=None):
     dropped in vlm_server detect.py) and the model has seen contamination
     positives. Never fuse it with the spectral state.
     """
-    decided = class_route(objects)
+    decided = class_route(objects, routing)
     if decided is not None:
         return decided
     if reading is None:
@@ -112,7 +101,8 @@ def format_timing(vlm_ms, reading):
     return "    vlm {} | {}".format(vlm, sensor)
 
 
-def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_PATH):
+def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_PATH,
+                  routing=DEFAULT_ROUTING):
     """Route one frame, log the decision and move the servo; servo=None only
     prints (dry run). An empty frame is logged but never actuates: in --loop
     it is the common case, and there is nothing to divert.
@@ -131,11 +121,11 @@ def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_P
     request_id = result.get("request_id", "?")
 
     reading = None
-    if class_route(objects) is None:
+    if class_route(objects, routing) is None:
         reading = spectral.collect(substrate_of(objects), request_id=request_id)
     else:
         spectral.cancel()   # the labels decided: the background read is not needed
-    stream, reason = route(objects, reading)
+    stream, reason = route(objects, reading, routing)
     angle = STREAM_ANGLE[stream]
     elapsed = None if t0 is None else time.monotonic() - t0
     vlm_ms = result.get("client_elapsed_ms")
@@ -153,6 +143,7 @@ def act_on_result(result, spectral, servo=None, t0=None, log_path=DECISION_LOG_P
             "reason": reading.reason, "timing": reading.timing},
         "vlm_s": None if vlm_ms is None else vlm_ms / 1000,
         "reference_timestamp": (spectral.reference or {}).get("timestamp"),
+        "routing_digest": routing.digest,
         "decision_s": elapsed,
     })
 

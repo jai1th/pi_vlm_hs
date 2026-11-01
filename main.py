@@ -18,6 +18,10 @@ until the servo is back home, to detection_recordings/<time>_<request_id>.mp4
 Run --calibrate at the start of each session: without a usable
 session_reference.json every GREEN-class item routes CLEAR (no_session_reference).
 
+Which item goes to which bag is read once at startup from routing.json (--routing),
+which the dashboard's Routing tab edits; without it the built-in mapping applies.
+Restart main.py after saving a new mapping.
+
 Modules: capture.py (frames), vlm_pi_client.py (HTTP + preprocessing),
 actions.py (decision node: class + spectral gate -> stream), spectral_node.py (AS7265x
 gate), contamination_config.py (veto constants), servo.py (pigpio servo),
@@ -35,6 +39,7 @@ from actions import act_on_result
 from contamination_config import CONTAM_MODEL, MIN_REPLICATES, REPLICATES, SESSION_REFERENCE_PATH
 from recorder import RECORDINGS_DIR, Recorder, RecorderError
 from results import print_result
+import routing as routing_config
 from servo import DEFAULT_SPEED_DPS, SERVO_PIN, Servo, ServoError
 from spectral_node import (As7265xSensor, SpectralError, SpectralNode, calibrate_and_save,
                            load_reference)
@@ -84,10 +89,13 @@ def parse_args():
     p.add_argument("--record-dir", default=RECORDINGS_DIR,
                    help="Where each detection's MP4 goes (default: detection_recordings/ in the repo)")
     p.add_argument("--no-record", action="store_true", help="Do not record detections")
+    p.add_argument("--routing", default=routing_config.ROUTING_PATH,
+                   help="Item -> bag mapping (default routing.json; edited in the dashboard)")
     return p.parse_args()
 
 
-def run_once(source, client, spectral, servo, as_json, save_dir=None, t0=None, recorder=None):
+def run_once(source, client, spectral, servo, as_json, save_dir=None, t0=None, recorder=None,
+             routing=routing_config.DEFAULT_ROUTING):
     if t0 is None:
         t0 = time.monotonic()
     image = source.grab()
@@ -101,7 +109,8 @@ def run_once(source, client, spectral, servo, as_json, save_dir=None, t0=None, r
         result = client.detect_pil(image, request_id=request_id)
         if as_json:
             print_result(result, as_json=True)
-        act_on_result(result, spectral, servo, t0)   # returns once the servo is home
+        act_on_result(result, spectral, servo, t0,   # returns once the servo is home
+                      routing=routing)
         if frame_path:
             save_result(result, frame_path)
     finally:
@@ -118,6 +127,28 @@ def warn_no_reference(why):
     print("WARNING: no usable spectral reference: {}".format(why), file=sys.stderr)
     print("         every GREEN-class item will route CLEAR (no_session_reference)", file=sys.stderr)
     print("=" * 72, file=sys.stderr)
+
+
+def open_routing(path):
+    """The mapping to route with, printed. A broken file never stops the run:
+    it falls back to the built-in mapping, loudly."""
+    routing, problem = routing_config.load(path)
+    if problem:
+        print("=" * 72, file=sys.stderr)
+        print("WARNING: {}".format(problem), file=sys.stderr)
+        print("         routing with the built-in mapping instead", file=sys.stderr)
+        print("=" * 72, file=sys.stderr)
+    source = "built-in" if routing.updated is None else "{}, saved {}".format(path, routing.updated)
+    print("routing ({}, {}):".format(source, routing.digest))
+    for label in routing_config.LABELS:
+        print("  {:<15} -> {}".format(label, routing_config.outcome(routing, label)))
+    if routing.unchecked:
+        print("=" * 72, file=sys.stderr)
+        print("WARNING: no contamination check for: {}".format(", ".join(sorted(routing.unchecked))),
+              file=sys.stderr)
+        print("         these go GREEN on the camera label alone", file=sys.stderr)
+        print("=" * 72, file=sys.stderr)
+    return routing
 
 
 def open_recorder(source, record_dir):
@@ -216,6 +247,7 @@ def main():
         print("error: {}".format(exc), file=sys.stderr)
         return 2
 
+    routing = open_routing(args.routing)
     spectral = recorder = None
     try:
         source.open()
@@ -229,7 +261,7 @@ def main():
             while True:
                 try:
                     run_once(source, client, spectral, servo, args.json, args.save_dir,
-                             recorder=recorder)
+                             recorder=recorder, routing=routing)
                 except (VLMClientError, CaptureError, ServoError) as exc:
                     print("error: {}".format(exc), file=sys.stderr)
                     if args.once:
@@ -250,7 +282,7 @@ def main():
                 return 0
             try:
                 run_once(source, client, spectral, servo, args.json, args.save_dir, t0,
-                         recorder=recorder)
+                         recorder=recorder, routing=routing)
             except (VLMClientError, CaptureError, ServoError) as exc:
                 print("error: {}".format(exc), file=sys.stderr)
     except (VLMClientError, CaptureError, ServoError) as exc:
